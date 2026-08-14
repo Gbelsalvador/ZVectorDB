@@ -69,4 +69,35 @@ pub fn main(init: std.process.Init) !void {
     } else {
         std.debug.print("aucun document trouvé\n", .{});
     }
+
+    const results = try index.searchAnd(
+        allocator,
+        "machine",
+        "learning",
+    );
+
+    defer allocator.free(results);
+
+    std.debug.print(
+        "\nRecherche : machine AND learning\n",
+        .{},
+    );
+
+    std.debug.print(
+        "resultats: ",
+        .{},
+    );
+
+    for (results, 0..) |document_id, i| {
+        if (i > 0) {
+            std.debug.print(", ", .{});
+        }
+
+        std.debug.print(
+            "{d}",
+            .{document_id},
+        );
+    }
+
+    std.debug.print("\n", .{});
 }
