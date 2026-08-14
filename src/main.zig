@@ -71,7 +71,6 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const results = try index.searchAnd(
-        allocator,
         "machine",
         "learning",
     );

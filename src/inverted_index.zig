@@ -72,15 +72,15 @@ pub const InvertedIndex = struct {
         return false;
     }
 
-    pub fn intersect(allocator: std.mem.Allocator, left: []const usize, right: []const usize) ![]usize {
-        var result = std.ArrayList(usize).init(allocator);
-
+    pub fn intersect(self: *const InvertedIndex, left: []const usize, right: []const usize) ![]usize {
+        var result = std.ArrayList(usize).empty;
+        errdefer result.deinit(self.allocator);
         var i: usize = 0;
         var j: usize = 0;
 
         while (i < left.len and j < right.len) {
             if (left[i] == right[j]) {
-                try result.append(left[i]);
+                try result.append(self.allocator, left[i]);
                 i += 1;
                 j += 1;
             } else if (left[i] < right[j]) {
@@ -89,25 +89,23 @@ pub const InvertedIndex = struct {
                 j += 1;
             }
         }
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(self.allocator);
     }
 
     pub fn searchAnd(
         self: *const InvertedIndex,
-        allocator: std.mem.Allocator,
         left_token: []const u8,
         right_token: []const u8,
     ) ![]usize {
         const left = self.search(left_token) orelse {
-            return allocator.alloc(usize, 0);
+            return self.allocator.alloc(usize, 0);
         };
 
         const right = self.search(right_token) orelse {
-            return allocator.alloc(usize, 0);
+            return self.allocator.alloc(usize, 0);
         };
 
-        return intersect(
-            allocator,
+        return self.intersect(
             left,
             right,
         );
