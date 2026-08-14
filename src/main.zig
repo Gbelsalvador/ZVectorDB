@@ -12,94 +12,61 @@ pub fn main(init: std.process.Init) !void {
     //-----------------------------------------
 
     const documents = [_]Document{
-        Document.init(
-            1,
-            "machine learning avec python",
-        ),
-        Document.init(
-            2,
-            "Deep learinig avec pytorch",
-        ),
-        Document.init(
-            1,
-            "machine learning et transformers",
-        ),
+        Document.init(1, "machine learning avec python"),
+        Document.init(2, "Deep learning avec pytorch"),
+        Document.init(3, "machine learning et transformers"),
     };
 
     //----------------------------------------------
-    //TOKENIZER
+    // TOKENIZER & INDEX
     //-----------------------------------------------
 
     var tokenizer = Tokenizer.init(allocator);
 
-    //---------------------------------------------
-    // INVERTED INDEC
-    //----------------------------------------------
     var index = InvertedIndex.init(allocator);
     defer index.deinit();
 
     //------------------------------
-    //indexatio,
+    // Indexation
     //-----------------------------
 
     for (documents) |document| {
-        const tokens = try tokenizer.tokenize(
-            document.content,
-        );
+        const tokens = try tokenizer.tokenize(document.content);
         defer tokenizer.freeTokens(tokens);
 
         for (tokens) |token| {
-            try index.add(
-                token,
-                document.id,
-            );
+            try index.add(token, document.id);
         }
     }
 
     //--------------------------------------
-    //AFFICHAGE DE l'INDEX
+    // Affichage de l'Index
     //-------------------------------------
 
-    std.debug.print(
-        "\n====== ZDEBUG INVERTED INDEX =============\n\n",
-        .{},
-    );
-
+    std.debug.print("\n====== ZDEBUG INVERTED INDEX =============\n\n", .{});
     index.print();
 
     //--------------------------------
-    //RECHERCHE
+    // Recherche
     //---------------------------------
 
-    std.debug.print(
-        "\n==== SEARCH ==========\n\n",
-        .{},
-    );
+    std.debug.print("\n==== SEARCH ==========\n\n", .{});
 
     const query = "learning";
 
     if (index.search(query)) |document_ids| {
-        std.debug.print(
-            "Document contenant '{s}' :",
-            .{query},
-        );
+        std.debug.print("Document contenant '{s}' : ", .{query});
 
         for (document_ids, 0..) |document_id, i| {
             if (i > 0) {
-                std.debug.print(",", .{});
+                std.debug.print(", ", .{});
             }
 
-            std.debug.print(
-                "{d}",
-                .{document_id},
-            );
+            std.debug.print("{d}", .{document_id});
         }
 
         std.debug.print("\n", .{});
     } else {
-        std.debug.print(
-            "aucun document troubé\n",
-            .{},
-        );
+        std.debug.print("aucun document trouvé\n", .{});
     }
 }

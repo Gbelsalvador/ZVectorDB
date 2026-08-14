@@ -2,7 +2,6 @@ const std = @import("std");
 
 pub const InvertedIndex = struct {
     allocator: std.mem.Allocator,
-
     index: std.StringHashMap(std.ArrayList(usize)),
 
     pub fn init(allocator: std.mem.Allocator) InvertedIndex {
@@ -17,9 +16,9 @@ pub const InvertedIndex = struct {
 
         while (iterator.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
-            entry.value_ptr.deinit(self.allocator);
+            entry.value_ptr.deinit(self.allocator); // En 0.16, ArrayList.deinit prend l'allocateur
         }
-        self.index.deinit();
+        self.index.deinit(); // StringHashMap.deinit ne prend pas d'argument
     }
 
     pub fn add(
@@ -78,7 +77,7 @@ pub const InvertedIndex = struct {
 
         while (iterator.next()) |entry| {
             std.debug.print(
-                "{s} ->",
+                "{s} -> ",
                 .{entry.key_ptr.*},
             );
             for (entry.value_ptr.items, 0..) |document_id, i| {

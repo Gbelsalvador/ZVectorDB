@@ -10,7 +10,7 @@ pub const Tokenizer = struct {
     }
 
     pub fn tokenize(
-        self: *Tokenizer,
+        self: Tokenizer,
         text: []const u8,
     ) ![][]u8 {
         var tokens = std.ArrayList([]u8).empty;
@@ -20,17 +20,21 @@ pub const Tokenizer = struct {
             }
             tokens.deinit(self.allocator);
         }
+
         var iterator = std.mem.tokenizeAny(
             u8,
             text,
-            "\t\n\r.,!?;:\"'()[]{}",
+            " \t\n\r.,!?;:\"'()[]{}",
         );
 
         while (iterator.next()) |word| {
             const token = try self.allocator.alloc(u8, word.len);
+            errdefer self.allocator.free(token);
+
             for (word, 0..) |character, i| {
                 token[i] = std.ascii.toLower(character);
             }
+
             try tokens.append(self.allocator, token);
         }
 
@@ -38,7 +42,7 @@ pub const Tokenizer = struct {
     }
 
     pub fn freeTokens(
-        self: *Tokenizer,
+        self: Tokenizer,
         tokens: [][]u8,
     ) void {
         for (tokens) |token| {
