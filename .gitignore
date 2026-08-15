@@ -1,3 +1,4 @@
 document/
 .zig-cache/
 zig-out/
+test/
