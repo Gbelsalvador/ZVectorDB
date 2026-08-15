@@ -33,9 +33,9 @@ pub const SearchEngine = struct {
         const tokens = try self.tokenizer.tokenize(query);
         defer self.tokenizer.freeTokens(tokens);
 
-        const results = std.AutoHashMap(usize, f64).init(self.allocator);
+        var results = std.AutoHashMap(usize, f64).init(self.allocator);
 
-        defer results.deinit(self.allocator);
+        defer results.deinit();
 
         const avgdl = self.index.averageDocumentLength();
 

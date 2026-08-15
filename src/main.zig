@@ -12,9 +12,9 @@ pub fn main(init: std.process.Init) !void {
     //-----------------------------------------
 
     const documents = [_]Document{
-        Document.init(1, "machine learning avec python"),
+        Document.init(1, "machine learning learning avec python"),
         Document.init(2, "Deep learning avec pytorch"),
-        Document.init(3, "machine learning et transformers"),
+        Document.init(3, "machine learning et transformers et python"),
     };
 
     //----------------------------------------------
