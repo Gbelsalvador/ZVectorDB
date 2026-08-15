@@ -4,11 +4,17 @@ pub const Posting = struct { document_id: usize, frequency: usize };
 pub const InvertedIndex = struct {
     allocator: std.mem.Allocator,
     index: std.StringHashMap(std.ArrayList(Posting)),
+    document_lengts: std.AutoHashMap(usize, usize),
+    total_documents: usize,
+    total_terms: usize,
 
     pub fn init(allocator: std.mem.Allocator) InvertedIndex {
         return .{
             .allocator = allocator,
             .index = std.StringHashMap(std.ArrayList(Posting)).init(allocator),
+            .document_lengts = std.AutoHashMap(usize, usize).init(allocator),
+            .total_documents = 0,
+            .total_terms = 0,
         };
     }
 
@@ -20,6 +26,7 @@ pub const InvertedIndex = struct {
             entry.value_ptr.deinit(self.allocator); // En 0.16, ArrayList.deinit prend l'allocateur
         }
         self.index.deinit(); // StringHashMap.deinit ne prend pas d'argument
+        self.document_lengts.deinit();
     }
 
     pub fn add(
@@ -59,6 +66,56 @@ pub const InvertedIndex = struct {
         try self.index.put(
             owned_token,
             postings_list,
+        );
+    }
+
+    pub fn addDocument(
+        self: *InvertedIndex,
+        document_id: usize,
+        total_terms: usize,
+    ) !void {
+        try self.document_lengts.put(
+            document_id,
+            total_terms,
+        );
+
+        self.total_documents += 1;
+        self.total_terms += total_terms;
+    }
+
+    pub fn documentFrequency(
+        self: *InvertedIndex,
+        token: []const u8,
+    ) usize {
+        if (self.index.get(token)) |postings| {
+            return postings.items.len;
+        }
+
+        return 0;
+    }
+
+    pub fn documentLength(
+        self: *InvertedIndex,
+        document_id: usize,
+    ) usize {
+        return self.document_lengts.get(
+            document_id,
+        ) orelse 0;
+    }
+
+    pub fn averageDocumentLength(
+        self: *InvertedIndex,
+    ) f64 {
+        if (self.total_documents == 0) {
+            return 0.0;
+        }
+
+        return @as(
+            f64,
+            @floatFromInt(self.total_terms),
+        ) / @as(
+            f64,
+            @floatFromInt(self.total_documents),
         );
     }
 

@@ -3,7 +3,7 @@ const std = @import("std");
 const Document = @import("document.zig").Document;
 const Tokenizer = @import("tokenizer.zig").Tokenizer;
 const InvertedIndex = @import("inverted_index.zig").InvertedIndex;
-
+const SearchEngine = @import("search_engine.zig").SearchEngine;
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
@@ -33,7 +33,10 @@ pub fn main(init: std.process.Init) !void {
     for (documents) |document| {
         const tokens = try tokenizer.tokenize(document.content);
         defer tokenizer.freeTokens(tokens);
-
+        try index.addDocument(
+            document.id,
+            tokens.len,
+        );
         for (tokens) |token| {
             try index.add(token, document.id);
         }
@@ -50,53 +53,72 @@ pub fn main(init: std.process.Init) !void {
     // Recherche
     //---------------------------------
 
-    std.debug.print("\n==== SEARCH ==========\n\n", .{});
-
-    const query = "learning";
-
-    if (index.search(query)) |document_ids| {
-        std.debug.print("Document contenant '{s}' : ", .{query});
-
-        for (document_ids, 0..) |document_id, i| {
-            if (i > 0) {
-                std.debug.print(", ", .{});
-            }
-
-            std.debug.print("{d}", .{document_id});
-        }
-
-        std.debug.print("\n", .{});
-    } else {
-        std.debug.print("aucun document trouvé\n", .{});
-    }
-
-    const results = try index.searchAnd(
-        "machine",
-        "learning",
+    std.debug.print("\n==== SEARCH BM25==========\n\n", .{});
+    var engine = SearchEngine.init(
+        allocator,
+        &index,
+    );
+    const results = try engine.search(
+        "machine learning",
     );
 
     defer allocator.free(results);
 
-    std.debug.print(
-        "\nRecherche : machine AND learning\n",
-        .{},
-    );
-
-    std.debug.print(
-        "resultats: ",
-        .{},
-    );
-
-    for (results, 0..) |document_id, i| {
-        if (i > 0) {
-            std.debug.print(", ", .{});
-        }
-
+    for (results) |result| {
         std.debug.print(
-            "{d}",
-            .{document_id},
+            "document {d} --- score = {d:.4}\n",
+            .{
+                result.document_id,
+                result.score,
+            },
         );
     }
+    // const query = "learning";
 
-    std.debug.print("\n", .{});
+    // if (index.search(query)) |document_ids| {
+    //     std.debug.print("Document contenant '{s}' : ", .{query});
+
+    //     for (document_ids, 0..) |document_id, i| {
+    //         if (i > 0) {
+    //             std.debug.print(", ", .{});
+    //         }
+
+    //         std.debug.print("{d}", .{document_id});
+    //     }
+
+    //     std.debug.print("\n", .{});
+    // } else {
+    //     std.debug.print("aucun document trouvé\n", .{});
+    // }
+
+    // const results = try index.searchAnd(
+    //     "machine",
+    //     "learning",
+    // );
+
+    // defer allocator.free(results);
+
+    // std.debug.print(
+    //     "\nRecherche : machine AND learning\n",
+    //     .{},
+    // );
+
+    // std.debug.print(
+    //     "resultats: ",
+    //     .{},
+    // );
+
+    // for (results, 0..) |document_id, i| {
+    //     if (i > 0) {
+    //         std.debug.print(", ", .{});
+    //     }
+
+    //     std.debug.print(
+    //         "{d}",
+    //         .{document_id},
+    //     );
+    // }
+
+    // std.debug.print("\n", .{});
+
 }
