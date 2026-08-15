@@ -1,13 +1,14 @@
 const std = @import("std");
+pub const Posting = struct { document_id: usize, frequency: usize };
 
 pub const InvertedIndex = struct {
     allocator: std.mem.Allocator,
-    index: std.StringHashMap(std.ArrayList(usize)),
+    index: std.StringHashMap(std.ArrayList(Posting)),
 
     pub fn init(allocator: std.mem.Allocator) InvertedIndex {
         return .{
             .allocator = allocator,
-            .index = std.StringHashMap(std.ArrayList(usize)).init(allocator),
+            .index = std.StringHashMap(std.ArrayList(Posting)).init(allocator),
         };
     }
 
@@ -26,34 +27,45 @@ pub const InvertedIndex = struct {
         token: []const u8,
         document_id: usize,
     ) !void {
-        if (self.index.getPtr(token)) |document_ids| {
-            if (!contains(document_ids.items, document_id)) {
-                try document_ids.append(self.allocator, document_id);
+        if (self.index.getPtr(token)) |postings_list| {
+            for (postings_list.items) |*posting| {
+                if (posting.document_id == document_id) {
+                    posting.frequency += 1;
+                    return;
+                }
             }
+            try postings_list.append(self.allocator, .{
+                .document_id = document_id,
+                .frequency = 1,
+            });
+
             return;
         }
 
         const owned_token = try self.allocator.dupe(u8, token);
 
-        var document_ids = std.ArrayList(usize).empty;
+        var postings_list = std.ArrayList(Posting).empty;
 
         errdefer {
             self.allocator.free(owned_token);
-            document_ids.deinit(self.allocator);
+            postings_list.deinit(self.allocator);
         }
 
-        try document_ids.append(self.allocator, document_id);
+        try postings_list.append(self.allocator, .{
+            .document_id = document_id,
+            .frequency = 1,
+        });
 
         try self.index.put(
             owned_token,
-            document_ids,
+            postings_list,
         );
     }
 
     pub fn search(
         self: *const InvertedIndex,
         token: []const u8,
-    ) ?[]const usize {
+    ) ?[]const Posting {
         if (self.index.get(token)) |list| {
             return list.items;
         }
@@ -72,18 +84,20 @@ pub const InvertedIndex = struct {
         return false;
     }
 
-    pub fn intersect(self: *const InvertedIndex, left: []const usize, right: []const usize) ![]usize {
+    pub fn intersect(self: *const InvertedIndex, left: []const Posting, right: []const Posting) ![]usize {
         var result = std.ArrayList(usize).empty;
         errdefer result.deinit(self.allocator);
         var i: usize = 0;
         var j: usize = 0;
 
         while (i < left.len and j < right.len) {
-            if (left[i] == right[j]) {
-                try result.append(self.allocator, left[i]);
+            const left_doc = left[i].document_id;
+            const right_doc = right[j].document_id;
+            if (left_doc == right_doc) {
+                try result.append(self.allocator, left_doc);
                 i += 1;
                 j += 1;
-            } else if (left[i] < right[j]) {
+            } else if (left_doc < right_doc) {
                 i += 1;
             } else {
                 j += 1;
@@ -97,13 +111,14 @@ pub const InvertedIndex = struct {
         left_token: []const u8,
         right_token: []const u8,
     ) ![]usize {
-        const left = self.search(left_token) orelse {
-            return self.allocator.alloc(usize, 0);
-        };
 
-        const right = self.search(right_token) orelse {
-            return self.allocator.alloc(usize, 0);
-        };
+        // pltutot que d'allouer une tranche vide on retourne une tranche
+        //constante pour plus de perfomance et eviter de fuite de memoire
+
+        const empty_postings: []const Posting = &.{};
+
+        const left = self.search(left_token) orelse empty_postings;
+        const right = self.search(right_token) orelse empty_postings;
 
         return self.intersect(
             left,
@@ -119,14 +134,14 @@ pub const InvertedIndex = struct {
                 "{s} -> ",
                 .{entry.key_ptr.*},
             );
-            for (entry.value_ptr.items, 0..) |document_id, i| {
+            for (entry.value_ptr.items, 0..) |posting, i| {
                 if (i > 0) {
                     std.debug.print(", ", .{});
                 }
 
                 std.debug.print(
-                    "{d}",
-                    .{document_id},
+                    "Doc:{d}(Freq:{d})",
+                    .{ posting.document_id, posting.frequency },
                 );
             }
             std.debug.print("\n", .{});
