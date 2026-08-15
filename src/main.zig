@@ -1,124 +1,93 @@
 const std = @import("std");
-
-const Document = @import("document.zig").Document;
 const Tokenizer = @import("tokenizer.zig").Tokenizer;
-const InvertedIndex = @import("inverted_index.zig").InvertedIndex;
-const SearchEngine = @import("search_engine.zig").SearchEngine;
+const Vocabulary = @import("vocabulary.zig").Vocabulary;
+const trainingDataset = @import("training_dataset.zig").TrainingDataset;
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
-    //-----------------------------------------
-    // Documents
-    //-----------------------------------------
+    var tokenizer = Tokenizer.init(allocator);
+    var vocabulary = Vocabulary.init(allocator);
+    defer vocabulary.deinit();
 
-    const documents = [_]Document{
-        Document.init(1, "machine learning learning avec python"),
-        Document.init(2, "Deep learning avec pytorch"),
-        Document.init(3, "machine learning et transformers et python"),
+    const sentences = [_][]const u8{
+        "le chat mange",
+        "le chien mange",
+        "le chat dort",
     };
 
-    //----------------------------------------------
-    // TOKENIZER & INDEX
-    //-----------------------------------------------
-
-    var tokenizer = Tokenizer.init(allocator);
-
-    var index = InvertedIndex.init(allocator);
-    defer index.deinit();
-
-    //------------------------------
-    // Indexation
-    //-----------------------------
-
-    for (documents) |document| {
-        const tokens = try tokenizer.tokenize(document.content);
-        defer tokenizer.freeTokens(tokens);
-        try index.addDocument(
-            document.id,
-            tokens.len,
+    for (sentences) |sentence| {
+        const tokens = try tokenizer.tokenize(
+            sentence,
         );
+
+        defer tokenizer.freeTokens(
+            tokens,
+        );
+
         for (tokens) |token| {
-            try index.add(token, document.id);
+            _ = try vocabulary.add(
+                token,
+            );
         }
     }
 
-    //--------------------------------------
-    // Affichage de l'Index
-    //-------------------------------------
-
-    std.debug.print("\n====== ZDEBUG INVERTED INDEX =============\n\n", .{});
-    index.print();
-
-    //--------------------------------
-    // Recherche
-    //---------------------------------
-
-    std.debug.print("\n==== SEARCH BM25==========\n\n", .{});
-    var engine = SearchEngine.init(
-        allocator,
-        &index,
-    );
-    const results = try engine.search(
-        "machine learning",
+    std.debug.print(
+        "\n==== VOCABULARY ====\n",
+        .{},
     );
 
-    defer allocator.free(results);
+    var id: usize = 0;
 
-    for (results) |result| {
+    while (id < vocabulary.size()) : (id += 1) {
+        const word = vocabulary.getWord(id).?;
+
         std.debug.print(
-            "document {d} --- score = {d:.4}\n",
+            "{d} -- {s}\n",
+            .{ id, word },
+        );
+    }
+
+    var dataset = trainingDataset.init(allocator);
+
+    defer dataset.deinit();
+
+    for (sentences) |sentence| {
+        const tokens = try tokenizer.tokenize(
+            sentence,
+        );
+
+        defer tokenizer.freeTokens(
+            tokens,
+        );
+
+        try dataset.buildFromTokens(
+            &vocabulary,
+            tokens,
+            1,
+        );
+    }
+
+    std.debug.print(
+        "\n=== TRAINING DATASET ===\n",
+        .{},
+    );
+
+    for (dataset.pairs.items) |pair| {
+        const context = vocabulary.getWord(
+            pair.context,
+        ).?;
+
+        const target = vocabulary.getWord(
+            pair.target,
+        ).?;
+
+        std.debug.print(
+            "{s} --- {s}\n",
             .{
-                result.document_id,
-                result.score,
+                context,
+                target,
             },
         );
     }
-    // const query = "learning";
-
-    // if (index.search(query)) |document_ids| {
-    //     std.debug.print("Document contenant '{s}' : ", .{query});
-
-    //     for (document_ids, 0..) |document_id, i| {
-    //         if (i > 0) {
-    //             std.debug.print(", ", .{});
-    //         }
-
-    //         std.debug.print("{d}", .{document_id});
-    //     }
-
-    //     std.debug.print("\n", .{});
-    // } else {
-    //     std.debug.print("aucun document trouvé\n", .{});
-    // }
-
-    // const results = try index.searchAnd(
-    //     "machine",
-    //     "learning",
-    // );
-
-    // defer allocator.free(results);
-
-    // std.debug.print(
-    //     "\nRecherche : machine AND learning\n",
-    //     .{},
-    // );
-
-    // std.debug.print(
-    //     "resultats: ",
-    //     .{},
-    // );
-
-    // for (results, 0..) |document_id, i| {
-    //     if (i > 0) {
-    //         std.debug.print(", ", .{});
-    //     }
-
-    //     std.debug.print(
-    //         "{d}",
-    //         .{document_id},
-    //     );
-    // }
-
-    // std.debug.print("\n", .{});
-
 }
