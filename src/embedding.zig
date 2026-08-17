@@ -63,7 +63,7 @@ pub const Embedding = struct {
         return self.weights[start .. start + self.dimension];
     }
 
-    pub fn dotWIth(
+    pub fn dotWith(
         self: *Embedding,
         word_id: usize,
         vector: []const f64,
