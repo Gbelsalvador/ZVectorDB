@@ -116,6 +116,7 @@ pub const NegativeSampler = struct {
         self: *NegativeSampler,
         random: std.Random,
     ) usize {
+        if (self.cumulative.len == 0) return 0;
         const value = random.float(f64);
         var left: usize = 0;
         var right: usize = self.cumulative.len;
@@ -141,6 +142,9 @@ pub const NegativeSampler = struct {
         random: std.Random,
         excluded_id: usize,
     ) usize {
+        if (self.cumulative.len <= 2.0) {
+            return 0;
+        }
         while (true) {
             const id = self.sample(random);
 
@@ -156,6 +160,12 @@ pub const NegativeSampler = struct {
         excluded_a: usize,
         excluded_b: usize,
     ) usize {
+
+        // pour gerer les cas donc la taille du dictionnaire ne permet pas d'exclure 2 elements
+
+        if (self.cumulative.len <= 2.0) {
+            return 0;
+        }
         while (true) {
             const id = self.sample(random);
 
