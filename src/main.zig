@@ -1,4 +1,5 @@
 const std = @import("std");
+const vector = @import("vector.zig");
 const Tokenizer = @import("tokenizer.zig").Tokenizer;
 const Vocabulary = @import("vocabulary.zig").Vocabulary;
 const trainingDataset = @import("training_dataset.zig").TrainingDataset;
@@ -72,4 +73,76 @@ pub fn main(init: std.process.Init) !void {
         const word = vocabulary.getWord(word_id).?; // Utiliser getWord pour afficher le texte du token
         std.debug.print("{s} - {d:.4}\n", .{ word, probability });
     }
+
+    const epochs = 1000;
+    const learning_rate = 0.05;
+
+    var epoch: usize = 0;
+
+    while (epoch < epochs) : (epoch += 1) {
+        var total_loss: f64 = 0.0;
+
+        for (dataset.pairs.items) |pair| {
+            const loss =
+                model.forward(
+                    pair.context,
+                    pair.target,
+                );
+
+            total_loss += loss;
+
+            model.backward(
+                pair.context,
+                pair.target,
+            );
+
+            model.update(
+                learning_rate,
+            );
+        }
+
+        if (epoch % 100 == 0) {
+            const average_loss =
+                total_loss /
+                @as(
+                    f64,
+                    @floatFromInt(
+                        dataset.len(),
+                    ),
+                );
+
+            std.debug.print(
+                "Epoch {d} | Loss = {d:.6}\n",
+                .{
+                    epoch,
+                    average_loss,
+                },
+            );
+        }
+    }
+
+    const chat_id = vocabulary.getId("chat").?;
+    const chien_id = vocabulary.getId("chien").?;
+    const mange_id = vocabulary.getId("mange").?;
+    const chat_vector = model.input.get(chat_id);
+    const mange_vector = model.input.get(mange_id);
+    const chien_vector = model.input.get(chien_id);
+    std.debug.print(
+        "\n=======SIMILARITIES ========\n",
+        .{},
+    );
+
+    std.debug.print(
+        "chat -- chien = {d:.4}\n",
+        .{
+            vector.cosineSimilarity(chat_vector, chien_vector),
+        },
+    );
+
+    std.debug.print(
+        "chat --- mange = {d:.4}\n",
+        .{
+            vector.cosineSimilarity(chat_vector, mange_vector),
+        },
+    );
 }
