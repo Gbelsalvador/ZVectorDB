@@ -6,11 +6,17 @@ const softmax = @import("softmax.zig").softmax;
 
 const crossEntropy = @import("loss.zig").crossEntropy;
 
+const vector = @import("vector.zig");
+
+const negativeSample = @import("negative_sampling.zig");
+
+const negativesampler = @import("negative_sampler.zig").NegativeSampler;
+
 pub const Word2vec = struct {
     allocator: std.mem.Allocator,
 
     vocab_size: usize,
-    dimenson: usize,
+    dimension: usize,
 
     input: Embedding,
     output: Embedding,
@@ -68,7 +74,7 @@ pub const Word2vec = struct {
         return .{
             .allocator = allocator,
             .vocab_size = vocab_size,
-            .dimenson = dimension,
+            .dimension = dimension,
             .input = input,
             .output = output,
             .scores = scores,
@@ -149,9 +155,9 @@ pub const Word2vec = struct {
         const context_vector = self.input.get(context_id);
         for (0..self.vocab_size) |word_id| {
             const gradient_score = self.grad_scores[word_id];
-            const start = word_id * self.dimenson;
+            const start = word_id * self.dimension;
 
-            for (0..self.dimenson) |d| {
+            for (0..self.dimension) |d| {
                 self.grad_output[
                     start + d
                 ] += gradient_score * context_vector[d];
@@ -163,13 +169,13 @@ pub const Word2vec = struct {
         self: *Word2vec,
         context_id: usize,
     ) void {
-        const start = context_id * self.dimenson;
+        const start = context_id * self.dimension;
 
         for (0..self.vocab_size) |word_id| {
             const gradient_score = self.grad_scores[word_id];
             const output_vector = self.output.get(word_id);
 
-            for (0..self.dimenson) |d| {
+            for (0..self.dimension) |d| {
                 self.grad_input[start + d] += gradient_score * output_vector[d];
             }
         }
@@ -210,6 +216,28 @@ pub const Word2vec = struct {
             learning_rate,
         );
     }
+
+    fn accumulatePairGradient(
+        self: *Word2vec,
+        context_id: usize,
+        output_id: usize,
+        gradient: f64,
+    ) void {
+        const context = self.input.get(
+            context_id,
+        );
+        const output = self.output.get(
+            output_id,
+        );
+        const output_start = output_id * self.dimension;
+        const input_start = context_id * self.dimension;
+
+        for (0..self.dimension) |d| {
+            self.grad_output[output_start + d] += gradient * context[d];
+
+            self.grad_input[input_start + d] += gradient * output[d];
+        }
+    }
     pub fn forward(
         self: *Word2vec,
         context_id: usize,
@@ -243,6 +271,108 @@ pub const Word2vec = struct {
     ) void {
         self.input.randomize(random);
         self.output.randomize(random);
+    }
+
+    pub fn trainPair(
+        self: *Word2vec,
+        random: std.Random,
+        sampler: *negativesampler,
+        context_id: usize,
+        target_id: usize,
+        num_negative: usize,
+    ) f64 {
+        self.zeroGradients();
+
+        var loss: f64 = 0.0;
+
+        const context = self.input.get(
+            context_id,
+        );
+
+        // =========================
+        // POSITIVE
+        // =========================
+
+        const target = self.output.get(
+            target_id,
+        );
+
+        const positive_score =
+            vector.dot(
+                context,
+                target,
+            );
+
+        const positive_probability =
+            negativeSample.sigmoid(
+                positive_score,
+            );
+
+        loss +=
+            -@log(
+                @max(
+                    positive_probability,
+                    1e-12,
+                ),
+            );
+
+        const positive_gradient = positive_probability - 1.0;
+
+        self.accumulatePairGradient(
+            context_id,
+            target_id,
+            positive_gradient,
+        );
+
+        // =========================
+        // NEGATIVES
+        // =========================
+
+        var i: usize = 0;
+
+        while (i < num_negative) : (i += 1) {
+            const negative_id =
+                sampler.sampleExcludingTwo(
+                    random,
+                    context_id,
+                    target_id,
+                );
+
+            const negative =
+                self.output.get(
+                    negative_id,
+                );
+
+            const negative_score =
+                vector.dot(
+                    context,
+                    negative,
+                );
+
+            const negative_probability =
+                negativeSample.sigmoid(
+                    negative_score,
+                );
+
+            loss +=
+                -@log(
+                    @max(
+                        1.0 -
+                            negative_probability,
+                        1e-12,
+                    ),
+                );
+
+            const negative_gradient = negative_probability;
+
+            self.accumulatePairGradient(
+                context_id,
+                negative_id,
+                negative_gradient,
+            );
+        }
+
+        return loss;
     }
 
     pub fn backward(

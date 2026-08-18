@@ -5,6 +5,7 @@ pub const Vocabulary = struct {
 
     word_to_id: std.StringHashMap(usize),
     id_to_word: std.ArrayList([]u8),
+    frequencies: std.ArrayList(usize),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -17,6 +18,7 @@ pub const Vocabulary = struct {
             ),
 
             .id_to_word = std.ArrayList([]u8).empty,
+            .frequencies = std.ArrayList(usize).empty,
         };
     }
 
@@ -30,6 +32,7 @@ pub const Vocabulary = struct {
         }
 
         self.id_to_word.deinit(self.allocator);
+        self.frequencies.deinit();
     }
 
     pub fn add(
@@ -39,6 +42,7 @@ pub const Vocabulary = struct {
         if (self.word_to_id.get(
             word,
         )) |id| {
+            self.frequencies.items[id] += 1;
             return id;
         }
 
@@ -66,6 +70,8 @@ pub const Vocabulary = struct {
             self.allocator,
             owned_word,
         );
+
+        try self.frequencies.append(self.allocator, 1);
 
         return id;
     }
