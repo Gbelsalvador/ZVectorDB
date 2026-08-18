@@ -111,7 +111,7 @@ pub const Word2vec = struct {
         );
     }
     // fonction pour remettre le gradient à zeros
-    fn zeroGradients(
+    pub fn zeroGradients(
         self: *Word2vec,
     ) void {
         @memset(
@@ -128,6 +128,31 @@ pub const Word2vec = struct {
             self.grad_scores,
             0.0,
         );
+    }
+
+    pub fn updataBatch(
+        self: *Word2vec,
+        learinig_rate: f64,
+        batch_size: usize,
+    ) void {
+        const scale = learinig_rate / @as(
+            f64,
+            @floatFromInt(batch_size),
+        );
+
+        for (
+            self.input.weights,
+            self.grad_input,
+        ) |*weight, gradient| {
+            weight.* -= scale * gradient;
+        }
+
+        for (
+            self.output.weights,
+            self.grad_output,
+        ) |*weight, gradient| {
+            weight.* -= scale * gradient;
+        }
     }
 
     // fonction pour le calcule du gradient des scores
@@ -281,8 +306,6 @@ pub const Word2vec = struct {
         target_id: usize,
         num_negative: usize,
     ) f64 {
-        self.zeroGradients();
-
         var loss: f64 = 0.0;
 
         const context = self.input.get(
