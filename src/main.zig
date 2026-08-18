@@ -4,18 +4,226 @@ const Tokenizer = @import("tokenizer.zig").Tokenizer;
 const Vocabulary = @import("vocabulary.zig").Vocabulary;
 const trainingDataset = @import("training_dataset.zig").TrainingDataset;
 const Word2vec = @import("word2vec.zig").Word2vec;
-
+const NegtaiveSampler = @import("negative_sampler.zig").NegativeSampler;
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
     var tokenizer = Tokenizer.init(allocator);
     var vocabulary = Vocabulary.init(allocator);
     defer vocabulary.deinit();
+    var sampler = try NegtaiveSampler.init(allocator, vocabulary.frequencies.items);
+    defer sampler.deinit();
 
     const sentences = [_][]const u8{
+        // --- Groupe 1 : Chats, Chiens & Animaux de compagnie ---
         "le chat mange",
         "le chien mange",
         "le chat dort",
+        "le chien dort",
+        "le chat court",
+        "le chien court",
+        "le chat saute",
+        "le chien saute",
+        "le chat joue",
+        "le chien joue",
+        "le chat regarde",
+        "le chien regarde",
+        "le chat écoute",
+        "le chien écoute",
+        "le chat marche",
+        "le chien marche",
+        "le chat chasse",
+        "le chien chasse",
+        "le chat ronronne",
+        "le chien aboie",
+        "le chat griffe",
+        "le chien mord",
+        "le chat s amuse",
+        "le chien s amuse",
+        "le chat est rapide",
+        "le chien est rapide",
+        "le chat est petit",
+        "le chien est grand",
+        "le chat mange la viande",
+        "le chien mange la viande",
+        "le chat mange du poisson",
+        "le chien mange du poisson",
+        "le chat dort sur le lit",
+        "le chien dort sur le lit",
+        "le chat dort sous la table",
+        "le chien dort sous la table",
+        "le chat court dans le jardin",
+        "le chien court dans le jardin",
+        "le chat chasse une souris",
+        "le chien chasse un chat",
+        "le chat regarde l oiseau",
+        "le chien regarde la voiture",
+        "le chat saute sur le mur",
+        "le chien saute sur le mur",
+        "le chat boit du lait",
+        "le chien boit de l eau",
+        "le petit chat mange",
+        "le grand chien mange",
+        "un chat noir dort",
+        "un chien blanc court",
+
+        // --- Groupe 2 : Oiseaux, Poissons & Animaux sauvages ---
+        "l oiseau vole",
+        "l oiseau chante",
+        "l oiseau mange",
+        "l oiseau dort",
+        "l oiseau saute",
+        "le poisson nage",
+        "le poisson mange",
+        "le poisson dort",
+        "le lion chasse",
+        "le lion mange",
+        "le lion dort",
+        "le lion rugit",
+        "le tigre chasse",
+        "le tigre mange",
+        "le tigre court",
+        "le loup chasse",
+        "le loup aboie",
+        "le loup court",
+        "l oiseau vole dans le ciel",
+        "l oiseau chante une chanson",
+        "le poisson nage dans l eau",
+        "le poisson nage dans la riviere",
+        "le lion chasse une gazelle",
+        "le tigre dort dans la forêt",
+        "le loup court dans la montagne",
+        "un petit oiseau chante",
+        "un grand poisson nage",
+        "le lion est fort",
+        "le tigre est rapide",
+        "le loup est sauvage",
+
+        // --- Groupe 3 : Humains & Actions du quotidien ---
+        "l homme mange",
+        "la femme mange",
+        "l enfant mange",
+        "l homme dort",
+        "la femme dort",
+        "l enfant dort",
+        "l homme marche",
+        "la femme marche",
+        "l enfant marche",
+        "l homme court",
+        "la femme court",
+        "l enfant court",
+        "l homme regarde",
+        "la femme regarde",
+        "l enfant regarde",
+        "l homme lit un livre",
+        "la femme lit un livre",
+        "l enfant lit un livre",
+        "l homme ecrit une lettre",
+        "la femme ecrit une lettre",
+        "l homme parle",
+        "la femme parle",
+        "l enfant parle",
+        "l homme ecoute",
+        "la femme ecoute",
+        "l enfant ecoute",
+        "l homme travaille",
+        "la femme travaille",
+        "l homme conduit une voiture",
+        "la femme conduit une voiture",
+        "l enfant joue au ballon",
+        "l homme mange de la viande",
+        "la femme mange du poisson",
+        "l enfant boit du lait",
+        "l homme dort dans la chambre",
+        "la femme dort dans la chambre",
+        "l enfant dort sur le lit",
+        "l homme marche dans la rue",
+        "la femme marche dans la rue",
+        "l enfant court dans le parc",
+        "l homme regarde la television",
+        "la femme regarde le jardin",
+        "l enfant ecoute la musique",
+        "l homme habite dans la maison",
+        "la femme habite dans la maison",
+        "un homme fort travaille",
+        "une femme intelligente lit",
+        "un petit enfant joue",
+        "l homme est grand",
+        "la femme est grande",
+
+        // --- Groupe 4 : Objets, Nature & Lieux ---
+        "la voiture roule",
+        "la voiture s arrete",
+        "le bus roule",
+        "le train arrive",
+        "le train part",
+        "la maison est grande",
+        "la maison est belle",
+        "le jardin est grand",
+        "le jardin est beau",
+        "la table est grande",
+        "la chaise est petite",
+        "le livre est intéressant",
+        "l eau est froide",
+        "le soleil brille",
+        "la pluie tombe",
+        "le vent souffle",
+        "la nuit tombe",
+        "le jour se leve",
+        "la voiture roule vite",
+        "le train roule vite",
+        "la voiture est rouge",
+        "le bus est bleu",
+        "le soleil brille dans le ciel",
+        "la pluie tombe sur la maison",
+        "l eau coule dans la riviere",
+        "le livre est sur la table",
+        "le chat est sur la chaise",
+        "le chien est sous la table",
+        "la voiture est devant la maison",
+        "le jardin est derriere la maison",
+
+        // --- Groupe 5 : Phraséologie combinée & Sémantique poussée ---
+        "le chat mange le poisson",
+        "le chien mange la viande",
+        "l oiseau mange le poisson",
+        "le lion mange le chien",
+        "l homme mange le poisson",
+        "la femme mange le poisson",
+        "l enfant mange le pain",
+        "le chat et le chien jouent",
+        "l homme et la femme parlent",
+        "l enfant et le chien courent",
+        "l oiseau et le poisson vivent",
+        "le chat dort et le chien joue",
+        "l homme travaille et la femme lit",
+        "la voiture et le bus roulent",
+        "le train et la voiture arrivent",
+        "le petit chat chasse la souris",
+        "le grand chien garde la maison",
+        "l oiseau chante dans le jardin",
+        "le poisson nage dans la mer",
+        "le lion dort dans la savane",
+        "l homme marche vers la maison",
+        "la femme court vers la voiture",
+        "l enfant joue avec le chat",
+        "l homme joue avec le chien",
+        "le chat saute sur la table",
+        "le chien saute sur la chaise",
+        "l oiseau vole au dessus du jardin",
+        "la voiture passe dans la rue",
+        "la pluie tombe sur le jardin",
+        "le soleil illumine la maison",
+        "un chat noir mange du poisson",
+        "un chien blanc dort dans le jardin",
+        "un grand lion chasse dans la forêt",
+        "un petit oiseau vole dans le ciel",
+        "un homme fort conduit la voiture",
+        "une belle femme lit un grand livre",
+        "un petit enfant boit du bon lait",
+        "la maison bleue a un grand jardin",
+        "le train rouge arrive dans la gare",
+        "la voiture noire roule dans la rue",
     };
 
     // Note : Gardez les tokens ou assurez-vous que Vocabulary.add() fait une copie (dupe)
@@ -74,31 +282,48 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("{s} - {d:.4}\n", .{ word, probability });
     }
 
+    const batch_size: usize = 32;
     const epochs = 1000;
-    const learning_rate = 0.05;
+    const learning_rate = 0.025;
+    const num_negative = 5;
 
     var epoch: usize = 0;
 
     while (epoch < epochs) : (epoch += 1) {
+        dataset.shuffle(random);
         var total_loss: f64 = 0.0;
+        var total_examples: usize = 0;
+        var start: usize = 0;
 
-        for (dataset.pairs.items) |pair| {
-            const loss =
-                model.forward(
+        while (start < dataset.len()) {
+            const end = @min(
+                start + batch_size,
+                dataset.len(),
+            );
+
+            const current_batch_size = end - start;
+
+            model.zeroGradients();
+
+            var i = start;
+
+            while (i < end) : (i += 1) {
+                const pair = dataset.pairs.items[i];
+
+                total_loss += model.trainPair(
+                    random,
+                    &sampler,
                     pair.context,
                     pair.target,
+                    num_negative,
                 );
 
-            total_loss += loss;
+                total_examples += 1;
+            }
 
-            model.backward(
-                pair.context,
-                pair.target,
-            );
+            model.updataBatch(learning_rate, current_batch_size);
 
-            model.update(
-                learning_rate,
-            );
+            start = end;
         }
 
         if (epoch % 100 == 0) {
@@ -127,6 +352,24 @@ pub fn main(init: std.process.Init) !void {
     const chat_vector = model.input.get(chat_id);
     const mange_vector = model.input.get(mange_id);
     const chien_vector = model.input.get(chien_id);
+    const similar = try model.mostSimilar(
+        chat_id,
+        allocator,
+        5,
+    );
+
+    defer allocator.free(similar);
+    for (similar) |item| {
+        const word = vocabulary.getWord(item.id).?;
+
+        std.debug.print(
+            "{s} --- {d:.4}\n",
+            .{
+                word,
+                item.score,
+            },
+        );
+    }
     std.debug.print(
         "\n=======SIMILARITIES ========\n",
         .{},

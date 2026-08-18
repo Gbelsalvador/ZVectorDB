@@ -89,4 +89,14 @@ pub const TrainingDataset = struct {
             }
         }
     }
+
+    pub fn shuffle(
+        self: *TrainingDataset,
+        random: std.Random,
+    ) void {
+        random.shuffle(
+            TrainingPair,
+            self.pairs.items,
+        );
+    }
 };
