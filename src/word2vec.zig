@@ -155,6 +155,27 @@ pub const Word2vec = struct {
         }
     }
 
+    fn learningRate(
+        initial: f64,
+        minimum: f64,
+        epoch: usize,
+        total_epochs: usize,
+    ) f64 {
+        const progress = @as(
+            f64,
+            @floatFromInt(epoch),
+        ) / @as(
+            f64,
+            @floatFromInt(total_epochs),
+        );
+
+        const rate = initial * (1.0 - progress);
+
+        return @max(
+            rate,
+            minimum,
+        );
+    }
     // fonction pour le calcule du gradient des scores
 
     fn computeScoreGradients(
