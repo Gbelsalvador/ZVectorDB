@@ -4,13 +4,15 @@ const Tokenizer = @import("tokenizer.zig").Tokenizer;
 const Vocabulary = @import("vocabulary.zig").Vocabulary;
 const trainingDataset = @import("training_dataset.zig").TrainingDataset;
 const Word2vec = @import("word2vec.zig").Word2vec;
-
+const NegtaiveSampler = @import("negative_sampler.zig").NegativeSampler;
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
     var tokenizer = Tokenizer.init(allocator);
     var vocabulary = Vocabulary.init(allocator);
     defer vocabulary.deinit();
+    var sampler = try NegtaiveSampler.init(allocator, vocabulary.frequencies.items);
+    defer sampler.deinit();
 
     const sentences = [_][]const u8{
         "le chat mange",
@@ -75,7 +77,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const epochs = 1000;
-    const learning_rate = 0.05;
+    const learning_rate = 0.025;
+    const num_negative = 5;
 
     var epoch: usize = 0;
 
@@ -84,17 +87,15 @@ pub fn main(init: std.process.Init) !void {
 
         for (dataset.pairs.items) |pair| {
             const loss =
-                model.forward(
+                model.trainPair(
+                    random,
+                    &sampler,
                     pair.context,
                     pair.target,
+                    num_negative,
                 );
 
             total_loss += loss;
-
-            model.backward(
-                pair.context,
-                pair.target,
-            );
 
             model.update(
                 learning_rate,

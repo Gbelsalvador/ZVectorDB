@@ -32,7 +32,7 @@ pub const Vocabulary = struct {
         }
 
         self.id_to_word.deinit(self.allocator);
-        self.frequencies.deinit();
+        self.frequencies.deinit(self.allocator);
     }
 
     pub fn add(
