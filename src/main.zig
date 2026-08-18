@@ -352,6 +352,24 @@ pub fn main(init: std.process.Init) !void {
     const chat_vector = model.input.get(chat_id);
     const mange_vector = model.input.get(mange_id);
     const chien_vector = model.input.get(chien_id);
+    const similar = try model.mostSimilar(
+        chat_id,
+        allocator,
+        5,
+    );
+
+    defer allocator.free(similar);
+    for (similar) |item| {
+        const word = vocabulary.getWord(item.id).?;
+
+        std.debug.print(
+            "{s} --- {d:.4}\n",
+            .{
+                word,
+                item.score,
+            },
+        );
+    }
     std.debug.print(
         "\n=======SIMILARITIES ========\n",
         .{},

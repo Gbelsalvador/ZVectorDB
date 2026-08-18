@@ -12,6 +12,10 @@ const negativeSample = @import("negative_sampling.zig");
 
 const negativesampler = @import("negative_sampler.zig").NegativeSampler;
 
+pub const Similarword = struct {
+    id: usize,
+    score: f64,
+};
 pub const Word2vec = struct {
     allocator: std.mem.Allocator,
 
@@ -417,6 +421,73 @@ pub const Word2vec = struct {
         }
 
         return loss;
+    }
+
+    pub fn mostSimilar(
+        self: *Word2vec,
+        query_id: usize,
+        allocator: std.mem.Allocator,
+        top_k: usize,
+    ) ![]Similarword {
+        var results = try allocator.alloc(
+            Similarword,
+            self.vocab_size - 1,
+        );
+
+        var count: usize = 0;
+
+        const query = self.input.get(query_id);
+
+        for (0..self.vocab_size) |id| {
+            if (id == query_id) {
+                continue;
+            }
+
+            const candidate = self.input.get(id);
+
+            results[count] = .{
+                .id = id,
+                .score = vector.cosineSimilarity(
+                    query,
+                    candidate,
+                ),
+            };
+
+            count += 1;
+        }
+
+        // trier par score decroissant
+
+        std.sort.pdq(
+            Similarword,
+            results,
+            {},
+            struct {
+                fn lessThan(
+                    _: void,
+                    a: Similarword,
+                    b: Similarword,
+                ) bool {
+                    return a.score > b.score;
+                }
+            }.lessThan,
+        );
+
+        const result_count = @min(top_k, results.len);
+
+        const final_results = try allocator.alloc(
+            Similarword,
+            result_count,
+        );
+
+        @memcpy(
+            final_results,
+            results[0..result_count],
+        );
+
+        allocator.free(results);
+
+        return final_results;
     }
 
     pub fn backward(
