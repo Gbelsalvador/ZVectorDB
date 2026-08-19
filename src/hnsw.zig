@@ -50,7 +50,22 @@ pub const HNSW = struct {
             .nodes = std.ArrayList(Node).empty,
             .entry_point = null,
             .max_level = 0,
+            .vectors = std.ArrayList(f32).empty,
         };
+    }
+
+    pub fn deinit(
+        self: *HNSW,
+    ) void {
+        for (self.nodes.items) |*node| {
+            for (node.levels.items) |*Neighbors| {
+                Neighbors.deinit(self.allocator);
+            }
+
+            node.levels.deinit(self.allocator);
+        }
+        self.nodes.deinit(self.allocator);
+        self.vectors.deinit(self.allocator);
     }
 
     fn getVector(
@@ -78,7 +93,7 @@ pub const HNSW = struct {
         const id =
             self.nodes.items.len;
 
-        const offset =
+        const vector_offset =
             self.vectors.items.len;
 
         try self.vectors.appendSlice(
@@ -92,6 +107,12 @@ pub const HNSW = struct {
                 std.ArrayList(usize),
             ).empty;
 
+        errdefer {
+            for (levels.items) |*neighbors| {
+                neighbors.deinit(self.allocator);
+            }
+            levels.deinit(self.allocator);
+        }
         var i: usize = 0;
 
         while (i <= level) : (i += 1) {
@@ -99,20 +120,21 @@ pub const HNSW = struct {
         }
         try self.nodes.append(.{
             .id = id,
-            .vector_offset = offset,
+            .vector_offset = vector_offset,
             .levels = levels,
         });
+
+        if (self.entry_point == null) {
+            self.entry_point = id;
+            self.max_level = level;
+
+            return id;
+        }
 
         var current =
             self.entry_point.?;
 
         var current_level = self.max_level;
-
-        try self.connect(
-            neighbor_id,
-            id,
-            level,
-        );
     }
 
     fn pruneNeighbors(
@@ -125,8 +147,62 @@ pub const HNSW = struct {
                 node_id
             ].levels.items[
                 level
-            ];
+            ].items;
+
+        if (neighbors.len <= self.m) {
+            return;
+        }
+
+        var Candidates = std.ArrayList(Candidate).empty;
+
+        for (neighbors) |neighbor_id| {
+            const score = vector.cosineSimilarity(
+                self.getVector(node_id),
+                self.getVector(neighbor_id),
+            );
+
+            try Candidates.appendAssumeCapacity(.{
+                .id = neighbor_id,
+                .score = score,
+            });
+        }
+
+        std.sort.pdq(
+            Candidate,
+            Candidates.items,
+            {},
+            struct {
+                fn lessthan(
+                    _: void,
+                    a: Candidate,
+                    b: Candidate,
+                ) bool {
+                    return a.score > b.score;
+                }
+            }.lessThan,
+        );
+        while (Candidates.items.len > self.m) {
+            _ = Candidates.pop();
+        }
+        var new_neighbors = std.ArrayList(usize).empty;
+        for (Candidates.items) |candidate| {
+            try new_neighbors.append(
+                candidate.id,
+            );
+        }
+        self.nodes.items[node_id].levels.items[level].deinit();
+        self.nodes.items[node_id].levels.items[level] = new_neighbors;
     }
+
+    fn connect(
+        self: *HNSW,
+        a: usize,
+        b: usize,
+        level: usize,
+    ) !void {
+        try self.nodes.items[a].levels.items[level].append(b);
+    }
+
     fn RandomLevel(
         random: std.Random,
     ) usize {
@@ -145,38 +221,44 @@ pub const HNSW = struct {
         entry: usize,
         level: usize,
     ) usize {
-        _ = level;
         var current = entry;
 
         while (true) {
-            var changed = false;
-
-            const current_node = &self.nodes.items[current];
+            const current_vector = self.getVector(current);
 
             const current_score = vector.cosineSimilarity(
                 query,
-                current_node.vector,
+                current_vector,
             );
-            for (current_node.neighbors.items) |neighbor_id| {
-                const neighbor = &self.nodes.items[neighbor_id];
+            var best = current;
+
+            var best_score = current_score;
+
+            const node = &self.nodes.items[current];
+
+            if (level >= node.levels.items.len) {
+                return current;
+            }
+            for (node.levels.items[level].items) |neighbor_id| {
+                const neighbor_vector = self.getVector(neighbor_id);
 
                 const score = vector.cosineSimilarity(
                     query,
-                    neighbor.vector,
+                    neighbor_vector,
                 );
 
-                if (score > current_score) {
-                    current = neighbor_id;
-                    changed = true;
-                    break;
+                if (score > best_score) {
+                    best = neighbor_id;
+                    best_score = score;
                 }
             }
 
-            if (!changed) {
-                break;
+            if (best == current) {
+                return current;
             }
+
+            current = best;
         }
-        return current;
     }
 
     fn searchLayer(
@@ -189,13 +271,7 @@ pub const HNSW = struct {
     ) ![]Candidate {
         var candidates = CandidateQueue.init(allocator, {});
 
-        defer candidates.deinit(self.allocator);
-
-        var results =
-            std.ArrayList(Candidate)
-                .init(allocator);
-
-        defer results.deinit(self.allocator);
+        defer candidates.deinit();
 
         var visited =
             std.AutoHashMap(
@@ -205,20 +281,28 @@ pub const HNSW = struct {
 
         defer visited.deinit(self.allocator);
 
+        var results =
+            std.ArrayList(Candidate)
+                .init(allocator);
+
+        defer results.deinit(self.allocator);
+
         const entry =
             &self.nodes.items[
                 entry_point
             ];
 
-        const entry_score =
+        const score =
             vector.cosineSimilarity(
                 query,
-                entry.vector,
+                self.getVector(
+                    entry_point,
+                ),
             );
 
         const initial = Candidate{
             .id = entry_point,
-            .score = entry_score,
+            .score = score,
         };
 
         try candidates.add(initial);
@@ -256,25 +340,22 @@ pub const HNSW = struct {
                     {},
                 );
 
-                const neighbor =
-                    &self.nodes.items[
-                        neighbor_id
-                    ];
-
-                const score =
+                const neighbor_score =
                     vector.cosineSimilarity(
                         query,
-                        neighbor.vector,
+                        self.getVector(
+                            neighbor_id,
+                        ),
                     );
 
-                try results.append(.{
+                try candidates.append(.{
                     .id = neighbor_id,
-                    .score = score,
+                    .score = neighbor_score,
                 });
 
-                try candidates.add(.{
+                try results.add(.{
                     .id = neighbor_id,
-                    .score = score,
+                    .score = neighbor_score,
                 });
 
                 std.mem.sort(Candidate, results.items, {}, struct {
