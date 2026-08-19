@@ -3,11 +3,8 @@ const vector = @import("vector.zig");
 
 pub const Node = struct {
     id: usize,
-
-    vector: []const f32,
-    neighbors: std.ArrayList(usize),
+    vector_offset: usize,
     levels: std.ArrayList(std.ArrayList(usize)),
-    level: usize,
 };
 
 pub const Candidate = struct {
@@ -34,6 +31,7 @@ pub const HNSW = struct {
     nodes: std.ArrayList(Node),
     entry_point: ?usize,
     max_level: usize,
+    vectors: std.ArrayList(f32),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -55,6 +53,80 @@ pub const HNSW = struct {
         };
     }
 
+    fn getVector(
+        self: *HNSW,
+        id: usize,
+    ) []const f32 {
+        const node =
+            &self.nodes.items[id];
+
+        return self.vectors.items[node.vector_offset .. node.vector_offset +
+            self.dimension];
+    }
+
+    pub fn insert(
+        self: *HNSW,
+        embedding: []const f32,
+        random: std.Random,
+    ) !usize {
+        if (embedding.len !=
+            self.dimension)
+        {
+            return error.InvalidDimension;
+        }
+
+        const id =
+            self.nodes.items.len;
+
+        const offset =
+            self.vectors.items.len;
+
+        try self.vectors.appendSlice(
+            embedding,
+        );
+
+        const level =
+            RandomLevel(random);
+        var levels =
+            std.ArrayList(
+                std.ArrayList(usize),
+            ).empty;
+
+        var i: usize = 0;
+
+        while (i <= level) : (i += 1) {
+            try levels.append(std.ArrayList(usize).empty);
+        }
+        try self.nodes.append(.{
+            .id = id,
+            .vector_offset = offset,
+            .levels = levels,
+        });
+
+        var current =
+            self.entry_point.?;
+
+        var current_level = self.max_level;
+
+        try self.connect(
+            neighbor_id,
+            id,
+            level,
+        );
+    }
+
+    fn pruneNeighbors(
+        self: *HNSW,
+        node_id: usize,
+        level: usize,
+    ) !void {
+        const neighbors =
+            self.nodes.items[
+                node_id
+            ].levels.items[
+                level
+            ];
+    }
     fn RandomLevel(
         random: std.Random,
     ) usize {
@@ -284,5 +356,99 @@ pub const HNSW = struct {
         }
 
         return candidates;
+    }
+
+    fn shouldSelect(
+        self: *HNSW,
+        query_id: usize,
+        Candidate_id: usize,
+        selected: []const usize,
+    ) bool {
+        const query = self.nodes.items[query_id].vector;
+
+        const candidate = self.nodes.items[Candidate_id].vector;
+
+        const candidate_score = vector.cosineSimilarity(
+            query,
+            candidate,
+        );
+
+        for (selected) |selected_id| {
+            const selected_vector = self.nodes.items[selected_id].vector;
+            const similarity = vector.cosineSimilarity(
+                candidate,
+                selected_vector,
+            );
+            if (similarity > candidate_score) {
+                return false;
+            }
+        }
+    }
+
+    fn selectNeighbors(
+        self: *HNSW,
+        query_id: usize,
+        candidates: []const Candidate,
+        max_neighbors: usize,
+        allocator: std.mem.Allocator,
+    ) ![]usize {
+        var sorted = try allocator.dupe(
+            Candidate,
+            candidates,
+        );
+
+        defer allocator.free(sorted);
+
+        std.mem.sort(Candidate, sorted, {}, struct {
+            fn lessThan(_: void, a: Candidate, b: Candidate) bool {
+                return a.score > b.score;
+            }
+        }.lessThan);
+
+        var selected = std.ArrayList(usize).empty;
+        defer selected.deinit(self.allocator);
+
+        for (sorted) |candidate| {
+            if (selected.items.len >= max_neighbors) {
+                break;
+            }
+
+            var accept = true;
+
+            const query = self.nodes.items[query_id].vector;
+            const candidate_vector = self.nodes.items[candidate.id].vector;
+            const candidate_score = vector.cosineSimilarity(
+                query,
+                candidate_vector,
+            );
+
+            for (selected.items) |selected_id| {
+                const selected_vector =
+                    self.nodes.items[
+                        selected_id
+                    ].vector;
+
+                const similarity =
+                    vector.cosineSimilarity(
+                        candidate_vector,
+                        selected_vector,
+                    );
+
+                if (similarity >
+                    candidate_score)
+                {
+                    accept = false;
+                    break;
+                }
+            }
+
+            if (accept) {
+                try selected.append(
+                    candidate.id,
+                );
+            }
+        }
+
+        return try selected.toOwnedSlice();
     }
 };
