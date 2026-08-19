@@ -5,6 +5,7 @@ const Vocabulary = @import("vocabulary.zig").Vocabulary;
 const trainingDataset = @import("training_dataset.zig").TrainingDataset;
 const Word2vec = @import("word2vec.zig").Word2vec;
 const NegtaiveSampler = @import("negative_sampler.zig").NegativeSampler;
+const vectorindex = @import("vector_index.zig").vectorindex;
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
@@ -14,6 +15,43 @@ pub fn main(init: std.process.Init) !void {
     var sampler = try NegtaiveSampler.init(allocator, vocabulary.frequencies.items);
     defer sampler.deinit();
 
+    var index = vectorindex.init(
+        allocator,
+        3,
+    );
+    defer index.deinit();
+
+    try index.add(
+        &[_]f64{ 1.0, 0.0, 0.0 },
+    );
+
+    try index.add(
+        &[_]f64{ 0.9, 0.1, 0.0 },
+    );
+
+    try index.add(
+        &[_]f64{ 0.0, 1.0, 0.0 },
+    );
+
+    try index.add(
+        &[_]f64{ 0.0, 0.0, 1.0 },
+    );
+
+    const query =
+        [_]f64{
+            0.95,
+            0.05,
+            0.0,
+        };
+
+    const results =
+        try index.search(
+            &query,
+            allocator,
+            3,
+        );
+
+    defer allocator.free(results);
     const sentences = [_][]const u8{
         // --- Groupe 1 : Chats, Chiens & Animaux de compagnie ---
         "le chat mange",
