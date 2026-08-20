@@ -6,52 +6,14 @@ const trainingDataset = @import("training_dataset.zig").TrainingDataset;
 const Word2vec = @import("word2vec.zig").Word2vec;
 const NegtaiveSampler = @import("negative_sampler.zig").NegativeSampler;
 const vectorindex = @import("vector_index.zig").vectorindex;
+const HNSW = @import("hnsw.zig").HNSW;
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
     var tokenizer = Tokenizer.init(allocator);
     var vocabulary = Vocabulary.init(allocator);
     defer vocabulary.deinit();
-    var sampler = try NegtaiveSampler.init(allocator, vocabulary.frequencies.items);
-    defer sampler.deinit();
 
-    var index = vectorindex.init(
-        allocator,
-        3,
-    );
-    defer index.deinit();
-
-    try index.add(
-        &[_]f64{ 1.0, 0.0, 0.0 },
-    );
-
-    try index.add(
-        &[_]f64{ 0.9, 0.1, 0.0 },
-    );
-
-    try index.add(
-        &[_]f64{ 0.0, 1.0, 0.0 },
-    );
-
-    try index.add(
-        &[_]f64{ 0.0, 0.0, 1.0 },
-    );
-
-    const query =
-        [_]f64{
-            0.95,
-            0.05,
-            0.0,
-        };
-
-    const results =
-        try index.search(
-            &query,
-            allocator,
-            3,
-        );
-
-    defer allocator.free(results);
     const sentences = [_][]const u8{
         // --- Groupe 1 : Chats, Chiens & Animaux de compagnie ---
         "le chat mange",
@@ -274,6 +236,9 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    var sampler = try NegtaiveSampler.init(allocator, vocabulary.frequencies.items);
+    defer sampler.deinit();
+
     std.debug.print("\n==== VOCABULARY ====\n", .{});
     var id: usize = 0;
     while (id < vocabulary.size()) : (id += 1) {
@@ -300,11 +265,11 @@ pub fn main(init: std.process.Init) !void {
 
     var prng = std.Random.DefaultPrng.init(42);
     const random = prng.random();
-
+    const vector_dim: usize = 10;
     var model = try Word2vec.init(
         allocator,
         vocabulary.size(),
-        10,
+        vector_dim,
     );
     defer model.deinit(); // Correction faute d'orthographe (denit -> deinit)
 
@@ -384,12 +349,56 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    //==================================================
+    // INITIALISATION ET POPULATION DE L'INDEX HNSW
+    //==================================================
+    std.debug.print("\n======== DEBUT DE l'INDEXATION HNSW===========\n", .{});
+    //parametre HNSW : dimension = 10, m=16, ef_construction=64, efçsearch=32
+    var hnsw_index = HNSW.init(allocator, vector_dim, 16, 64, 32);
+    defer hnsw_index.deinit();
+    // tampon pour convertir la representation f64 du modele en f32
+    const buffer_f32 = try allocator.alloc(f32, vector_dim);
+    defer allocator.free(buffer_f32);
+    var word_id: usize = 0;
+    // insertion desvecteurs de chaque mot du vocabulaire dans l'index
+    while (word_id < vocabulary.size()) : (word_id += 1) {
+        const raw_vector = model.input.get(word_id);
+        //copy/cast de f64 vers f32
+        for (raw_vector, 0..) |val, i| {
+            buffer_f32[i] = @floatCast(val);
+        }
+        _ = try hnsw_index.insert(buffer_f32, random);
+    }
+
+    std.debug.print("indexation de {d} mots terminée avec succes! \n", .{vocabulary.size()});
+
+    //=====================================================
+    // RECHERCHE DE VOISIN VIA HNSW
+    //=====================================================
     const chat_id = vocabulary.getId("chat").?;
     const chien_id = vocabulary.getId("chien").?;
     const mange_id = vocabulary.getId("mange").?;
     const chat_vector = model.input.get(chat_id);
     const mange_vector = model.input.get(mange_id);
     const chien_vector = model.input.get(chien_id);
+
+    for (chat_vector, 0..) |val, i| {
+        buffer_f32[i] = @floatCast(val);
+    }
+    const top_k: usize = 5;
+    const search_results = try hnsw_index.search(buffer_f32, allocator, top_k);
+    defer allocator.free(search_results);
+
+    std.debug.print("\n======== PLUS PROCHES VOISINS DE 'chat' (VIA HNSW) ======\n", .{});
+    for (search_results) |cand| {
+        const word = vocabulary.getWord(cand.id).?;
+        std.debug.print("{s} (id: {d}) ------ score cosine: {d:.4}\n", .{
+            word,
+            cand.id,
+            cand.score,
+        });
+    }
+
     const similar = try model.mostSimilar(
         chat_id,
         allocator,
@@ -416,14 +425,14 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print(
         "chat -- chien = {d:.4}\n",
         .{
-            vector.cosineSimilarity(chat_vector, chien_vector),
+            vector.cosineSimilarityF64(chat_vector, chien_vector),
         },
     );
 
     std.debug.print(
         "chat --- mange = {d:.4}\n",
         .{
-            vector.cosineSimilarity(chat_vector, mange_vector),
+            vector.cosineSimilarityF64(chat_vector, mange_vector),
         },
     );
 }

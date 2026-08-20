@@ -346,7 +346,7 @@ pub const Word2vec = struct {
         );
 
         const positive_score =
-            vector.dot(
+            vector.dot64(
                 context,
                 target,
             );
@@ -392,7 +392,7 @@ pub const Word2vec = struct {
                 );
 
             const negative_score =
-                vector.dot(
+                vector.dot64(
                     context,
                     negative,
                 );
@@ -447,7 +447,7 @@ pub const Word2vec = struct {
 
             results[count] = .{
                 .id = id,
-                .score = vector.cosineSimilarity(
+                .score = vector.cosineSimilarityF64(
                     query,
                     candidate,
                 ),
