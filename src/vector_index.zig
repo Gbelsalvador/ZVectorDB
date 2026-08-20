@@ -118,4 +118,77 @@ pub const vectorindex = struct {
 
         return output;
     }
+
+    pub fn topK(
+        allocator: std.mem.Allocator,
+        Candidates: []const SearchResult,
+        k: usize,
+    ) ![]SearchResult {
+        var results = try allocator.dupe(
+            SearchResult,
+            Candidates,
+        );
+
+        std.sort.pdq(
+            SearchResult,
+            results,
+            {},
+            struct {
+                fn lessThan(
+                    _: void,
+                    a: SearchResult,
+                    b: SearchResult,
+                ) bool {
+                    return a.score > b.score;
+                }
+            }.lessThan,
+        );
+
+        const count = @min(k, results.len);
+        const output = try allocator.alloc(
+            SearchResult,
+            count,
+        );
+
+        @memcpy(
+            output,
+            results[0..count],
+        );
+
+        allocator.free(results);
+
+        return output;
+    }
+
+    pub fn searchFlat(
+        vectors: []const f32,
+        dimension: usize,
+        query: []const f32,
+        k: usize,
+        allocator: std.mem.Allocator,
+        stats: *vector.DistanceStats,
+    ) ![]SearchResult {
+        const count = vectors.len / dimension;
+        var results = std.ArrayList(SearchResult).empty;
+        defer results.deinit(allocator);
+
+        var i: usize = 0;
+
+        while (i < count) : (i += 1) {
+            const start = i * dimension;
+            const current = vectors[start .. start + dimension];
+            const score = vector.cosineSimilarityCounted(query, current, stats);
+
+            try results.append(allocator, .{
+                .id = i,
+                .score = score,
+            });
+        }
+
+        return topK(
+            allocator,
+            results.items,
+            k,
+        );
+    }
 };

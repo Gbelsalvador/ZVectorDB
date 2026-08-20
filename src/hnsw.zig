@@ -138,7 +138,7 @@ pub const HNSW = struct {
         var current_level = self.max_level;
 
         while (current_level > level) : (current_level -= 1) {
-            current = self.greedySearch(embedding, current, current_level);
+            current = self.greedySearch(embedding, current, current_level, null);
             if (current_level == 0) break;
         }
 
@@ -257,6 +257,7 @@ pub const HNSW = struct {
         query: []const f32,
         entry: usize,
         level: usize,
+        stats: ?*vector.DistanceStats,
     ) usize {
         var current = entry;
 
@@ -269,7 +270,7 @@ pub const HNSW = struct {
             // );
             var best = current;
 
-            var best_score = vector.cosineSimilarity(query, self.getVector(current));
+            var best_score = if (stats) |s| vector.cosineSimilarityCounted(query, self.getVector(current), s) else vector.cosineSimilarity(query, self.getVector(current));
 
             const node = &self.nodes.items[current];
 
@@ -279,10 +280,11 @@ pub const HNSW = struct {
             for (node.levels.items[level].items) |neighbor_id| {
                 //const neighbor_vector = self.getVector(neighbor_id);
 
-                const score = vector.cosineSimilarity(
+                const score = if (stats) |s| vector.cosineSimilarityCounted(
                     query,
                     self.getVector(neighbor_id),
-                );
+                    s,
+                ) else vector.cosineSimilarity(query, self.getVector(neighbor_id));
 
                 if (score > best_score) {
                     best = neighbor_id;
@@ -452,6 +454,7 @@ pub const HNSW = struct {
         query: []const f32,
         allocator: std.mem.Allocator,
         top_k: usize,
+        stats: *vector.DistanceStats,
     ) ![]Candidate {
         if (self.entry_point == null) {
             return error.EmptyIndex;
@@ -464,7 +467,7 @@ pub const HNSW = struct {
             self.max_level;
 
         while (level > 0) : (level -= 1) {
-            current = self.greedySearch(query, current, level);
+            current = self.greedySearch(query, current, level, stats);
         }
         const candidates =
             try self.searchLayer(
