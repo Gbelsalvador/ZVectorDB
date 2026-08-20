@@ -20,8 +20,23 @@ pub fn CandidateLessThan(
     return std.math.order(b.score, a.score);
 }
 
-pub const CandidateQueue = std.PriorityQueue(Candidate, void, CandidateLessThan);
+pub fn resultLessThan(
+    _: void,
+    a: Candidate,
+    b: Candidate,
+) std.math.Order {
+    return std.math.order(
+        a.score,
+        b.score,
+    );
+}
 
+pub const CandidateQueue = std.PriorityQueue(Candidate, void, CandidateLessThan);
+pub const ResultQueue = std.PriorityQueue(
+    Candidate,
+    void,
+    resultLessThan,
+);
 pub const HNSW = struct {
     allocator: std.mem.Allocator,
     dimension: usize,
@@ -150,6 +165,7 @@ pub const HNSW = struct {
                 current_level,
                 self.ef_construction,
                 self.allocator,
+                null,
             );
             defer self.allocator.free(layer_candidates);
 
@@ -304,6 +320,7 @@ pub const HNSW = struct {
         level: usize,
         ef: usize,
         allocator: std.mem.Allocator,
+        stats: ?*vector.DistanceStats,
     ) ![]Candidate {
         var candidates = CandidateQueue{
             .items = &.{},
@@ -313,25 +330,37 @@ pub const HNSW = struct {
 
         defer candidates.deinit(self.allocator);
 
-        var visited =
-            std.AutoHashMap(
-                usize,
-                void,
-            ).init(allocator);
+        var resultsQ = ResultQueue{
+            .items = &.{},
+            .cap = 0,
+            .context = {},
+        };
+
+        defer resultsQ.deinit(self.allocator);
+
+        var visited = try allocator.alloc(
+            bool,
+            self.nodes.items.len,
+        );
 
         defer visited.deinit();
 
-        var results =
-            std.ArrayList(Candidate).empty;
+        @memset(
+            visited,
+            false,
+        );
 
-        const initial_score = vector.cosineSimilarity(query, self.getVector(entry_point));
+        // var results =
+        //     std.ArrayList(Candidate).empty;
+
+        const initial_score = if (stats) |s| vector.cosineSimilarityCounted(query, self.getVector(entry_point), s) else vector.cosineSimilarity(query, self.getVector(entry_point));
         const initial = Candidate{
             .id = entry_point,
             .score = initial_score,
         };
 
         try candidates.push(self.allocator, initial);
-        try results.append(self.allocator, initial);
+        try resultsQ.push(self.allocator, initial);
 
         try visited.put(
             entry_point,
@@ -339,9 +368,17 @@ pub const HNSW = struct {
         );
 
         while (candidates.count() > 0) {
-            const current =
-                candidates.pop().?;
+            const best =
+                candidates.peek().?;
 
+            if (resultsQ.count() >= ef) {
+                const worst = resultsQ.peek().?;
+
+                if (best.score < worst.score) {
+                    break;
+                }
+            }
+            const current = candidates.pop().?;
             const node_id = current.id;
             const node = self.nodes.items[node_id];
 
@@ -352,47 +389,64 @@ pub const HNSW = struct {
             }
 
             for (node.levels.items[level].items) |neighbor_id| {
-                if (visited.contains(
-                    neighbor_id,
-                )) {
+                if (visited[neighbor_id]) {
                     continue;
                 }
 
-                try visited.put(
-                    neighbor_id,
-                    {},
-                );
+                visited[neighbor_id] = true;
 
-                const neighbor_score =
-                    vector.cosineSimilarity(
+                const neighbor_score = if (stats) |s|
+                    vector.cosineSimilarityCounted(
                         query,
                         self.getVector(
                             neighbor_id,
                         ),
-                    );
+                        s,
+                    )
+                else
+                    vector.cosineSimilarity(query, self.getVector(neighbor_id));
 
-                if (results.items.len < ef or neighbor_score > results.items[results.items.len - 1].score) {
+                if (resultsQ.count() < ef or neighbor_score > resultsQ.peek().?.score) {
                     const c = Candidate{ .id = neighbor_id, .score = neighbor_score };
 
                     try candidates.push(self.allocator, c);
-                    try results.append(self.allocator, c);
+                    try resultsQ.push(self.allocator, c);
 
-                    std.mem.sort(Candidate, results.items, {}, struct {
-                        fn lessThan(_: void, a: Candidate, b: Candidate) bool {
-                            return a.score > b.score;
-                        }
-                    }.lessThan);
-
-                    if (results.items.len > ef) {
-                        _ = results.pop();
+                    if (resultsQ.count() > ef) {
+                        _ = resultsQ.pop();
                     }
                 }
             }
         }
 
-        return try results.toOwnedSlice(self.allocator);
-    }
+        var output = try allocator.alloc(
+            Candidate,
+            resultsQ.count(),
+        );
+        var i: usize = 0;
 
+        while (resultsQ.count() > 0) {
+            output[i] = resultsQ.pop().?;
+            i += 1;
+        }
+
+        std.sort.pdq(
+            Candidate,
+            output,
+            {},
+            struct {
+                fn lessThan(
+                    _: void,
+                    a: Candidate,
+                    b: Candidate,
+                ) bool {
+                    return a.score > b.score;
+                }
+            }.lessThan,
+        );
+
+        return output;
+    }
     fn selectNeighbors(
         self: *HNSW,
         candidates: []const Candidate,
@@ -476,6 +530,7 @@ pub const HNSW = struct {
                 0,
                 self.ef_search,
                 allocator,
+                null,
             );
 
         if (candidates.len > top_k) {
