@@ -8,6 +8,8 @@ const DIMENSION = 128;
 const DATASET_SIZE = 10_000;
 const QUERY_COUNT = 100;
 const K = 10;
+var total_time: i128 = 0;
+var total_distance: usize = 0;
 
 fn recallAtK(
     exact: anytype,

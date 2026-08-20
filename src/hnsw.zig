@@ -338,13 +338,17 @@ pub const HNSW = struct {
 
         defer resultsQ.deinit(self.allocator);
 
-        var visited =
-            std.AutoHashMap(
-                usize,
-                void,
-            ).init(allocator);
+        var visited = try allocator.alloc(
+            bool,
+            self.nodes.items.len,
+        );
 
         defer visited.deinit();
+
+        @memset(
+            visited,
+            false,
+        );
 
         // var results =
         //     std.ArrayList(Candidate).empty;
@@ -385,16 +389,11 @@ pub const HNSW = struct {
             }
 
             for (node.levels.items[level].items) |neighbor_id| {
-                if (visited.contains(
-                    neighbor_id,
-                )) {
+                if (visited[neighbor_id]) {
                     continue;
                 }
 
-                try visited.put(
-                    neighbor_id,
-                    {},
-                );
+                visited[neighbor_id] = true;
 
                 const neighbor_score = if (stats) |s|
                     vector.cosineSimilarityCounted(
