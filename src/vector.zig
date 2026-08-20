@@ -1,5 +1,8 @@
 const std = @import("std");
 
+pub const DistanceStats = struct {
+    comparisons: usize = 0,
+};
 pub fn dot(
     a: []const f32,
     b: []const f32,
@@ -69,4 +72,26 @@ pub fn cosineSimilarityF64(a: []const f64, b: []const f64) f64 {
     }
     if (norm_a == 0.0 or norm_b == 0.0) return 0.0;
     return dot_prod / (@sqrt(norm_a) * @sqrt(norm_b));
+}
+
+pub fn cosineSimilarityCounted(
+    a: []const f32,
+    b: []const f32,
+    stats: *DistanceStats,
+) f32 {
+    stats.comparisons += 1;
+    std.debug.assert(
+        a.len == b.len,
+    );
+
+    const dot_product = dot(a, b);
+
+    const magnitude_a = magnitude(a);
+    const magnitude_b = magnitude(b);
+
+    if (magnitude_a == 0.0 or magnitude_b == 0.0) {
+        return 0.0;
+    }
+
+    return dot_product / (magnitude_a * magnitude_b);
 }
