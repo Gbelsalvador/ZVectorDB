@@ -52,3 +52,62 @@ pub fn quantize(
         .scale = scale,
     };
 }
+
+test "INT8 quantization" {
+    const allocator =
+        std.testing.allocator;
+
+    const original = [_]f32{
+        -0.92,
+        -0.41,
+        0.03,
+        0.72,
+        0.98,
+    };
+
+    const quantized =
+        try quantize(
+            allocator,
+            &original,
+        );
+
+    defer allocator.free(
+        quantized.values,
+    );
+
+    const restored =
+        try dequantize(
+            allocator,
+            quantized,
+        );
+
+    defer allocator.free(
+        restored,
+    );
+
+    for (
+        original,
+        restored,
+    ) |a, b| {
+        std.debug.print(
+            "{d} -> {d}\n",
+            .{ a, b },
+        );
+    }
+}
+pub fn dequantize(
+    allocator: std.mem.Allocator,
+    input: QuantizedVector,
+) ![]f32 {
+    const output = try allocator.alloc(
+        f32,
+        input.values.len,
+    );
+    for (
+        input.values,
+        output,
+    ) |q, *x| {
+        x.* = @as(f32, @floatFromInt(q)) / input.scale;
+    }
+    return output;
+}
