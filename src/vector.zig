@@ -38,6 +38,25 @@ pub fn dotSIMD(
     return result;
 }
 
+pub fn dotInt8(
+    a: []const i8,
+    b: []const i8,
+) i32 {
+    std.debug.assert(
+        a.len == b.len,
+    );
+
+    var sum: i32 = 0;
+
+    for (a, b) |x, y| {
+        sum +=
+            @as(i32, x) *
+            @as(i32, y);
+    }
+
+    return sum;
+}
+
 pub fn squaredNormSIMD(a: []const f32) f32 {
     const width = 8;
     const vec = @Vector(width, f32);
