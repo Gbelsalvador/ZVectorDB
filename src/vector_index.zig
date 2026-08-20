@@ -169,7 +169,7 @@ pub const vectorindex = struct {
         stats: *vector.DistanceStats,
     ) ![]SearchResult {
         const count = vectors.len / dimension;
-        const results = std.ArrayList(SearchResult).empty;
+        var results = std.ArrayList(SearchResult).empty;
         defer results.deinit(allocator);
 
         var i: usize = 0;

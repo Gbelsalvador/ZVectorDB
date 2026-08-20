@@ -2,3 +2,5 @@ document/
 .zig-cache/
 zig-out/
 test/
+*.exe
+*.pdb
