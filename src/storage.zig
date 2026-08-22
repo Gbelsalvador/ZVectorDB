@@ -25,7 +25,7 @@ pub fn writeManifest(
 
     try w.interface.writeAll(std.mem.asBytes(&manifest));
 
-    // AJOUT CRUCIAL : Force l'écriture du tampon sur le disque avant la fermeture du fichier
+    // Force l'écriture du tampon sur le disque avant la fermeture du fichier
     try w.flush();
 }
 
@@ -63,7 +63,7 @@ pub fn writeVectors(
 
     try w.interface.writeAll(bytes);
 
-    // AJOUT CRUCIAL : Force l'écriture des vecteurs restants dans le tampon
+    // Force l'écriture du tampon sur le disque avant la fermeture du fichier
     try w.flush();
 }
 
