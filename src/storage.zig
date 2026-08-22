@@ -5,6 +5,7 @@ pub const Manifest = struct {
     version: u32,
     dimension: u32,
     vector_count: u64,
+    last_sequence: u64,
     metric: u8,
     quantization: u8,
     reserved: [6]u8,
