@@ -343,7 +343,7 @@ pub const HNSW = struct {
             self.nodes.items.len,
         );
 
-        defer visited.deinit();
+        defer allocator.free(visited);
 
         @memset(
             visited,
@@ -362,10 +362,7 @@ pub const HNSW = struct {
         try candidates.push(self.allocator, initial);
         try resultsQ.push(self.allocator, initial);
 
-        try visited.put(
-            entry_point,
-            {},
-        );
+        visited[entry_point] = true;
 
         while (candidates.count() > 0) {
             const best =

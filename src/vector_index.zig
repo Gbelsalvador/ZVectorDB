@@ -71,13 +71,14 @@ pub const vectorindex = struct {
         }
 
         var results = try allocator.alloc(SearchResult, self.count);
+        defer allocator.free(results);
 
         for (0..self.count) |id| {
             const candidate = self.get(id);
 
             results[id] = .{
                 .id = id,
-                .score = vector.cosineSimilarity(
+                .score = vector.cosineSimilarityF64(
                     query,
                     candidate,
                 ),
@@ -89,7 +90,7 @@ pub const vectorindex = struct {
             results,
             {},
             struct {
-                fn lessthan(
+                fn lessThan(
                     _: void,
                     a: SearchResult,
                     b: SearchResult,
@@ -114,8 +115,6 @@ pub const vectorindex = struct {
             results[0..result_count],
         );
 
-        allocator.free(results);
-
         return output;
     }
 
@@ -128,6 +127,7 @@ pub const vectorindex = struct {
             SearchResult,
             Candidates,
         );
+        defer allocator.free(results);
 
         std.sort.pdq(
             SearchResult,
@@ -154,8 +154,6 @@ pub const vectorindex = struct {
             output,
             results[0..count],
         );
-
-        allocator.free(results);
 
         return output;
     }
