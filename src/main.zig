@@ -14,8 +14,29 @@ extern "kernel32" fn SetConsoleOutputCP(code_page: u32) callconv(.winapi) i32;
 extern "kernel32" fn SetConsoleCP(code_page: u32) callconv(.winapi) i32;
 extern "kernel32" fn GetConsoleOutputCP() callconv(.winapi) u32;
 extern "kernel32" fn GetConsoleCP() callconv(.winapi) u32;
+extern "kernel32" fn GetStdHandle(handle: u32) callconv(.winapi) ?*anyopaque;
+extern "kernel32" fn GetConsoleMode(handle: ?*anyopaque, mode: *u32) callconv(.winapi) i32;
+extern "kernel32" fn SetConsoleMode(handle: ?*anyopaque, mode: u32) callconv(.winapi) i32;
 
-const ConsoleCodePages = struct { input: u32, output: u32 };
+const ConsoleCodePages = struct {
+    input: u32,
+    output: u32,
+    stderr_handle: ?*anyopaque,
+    stderr_mode: ?u32,
+};
+
+const ansi = struct {
+    const reset = "\x1b[0m";
+    const cyan_bold = "\x1b[1;36m";
+    const cyan = "\x1b[36m";
+    const green = "\x1b[32m";
+    const yellow = "\x1b[33m";
+    const red = "\x1b[31m";
+};
+
+const std_error_handle: u32 = 0xfffffff4;
+const enable_virtual_terminal_processing: u32 = 0x0004;
+var colors_enabled = true;
 
 const Document = struct {
     content: []u8,
@@ -40,7 +61,8 @@ pub fn main(init: std.process.Init) !void {
     var input_buffer: [4096]u8 = undefined;
     var reader = std.Io.File.stdin().reader(init.io, &input_buffer);
     while (true) {
-        std.debug.print("zvectordb> ", .{});
+        printColored(ansi.cyan_bold, "zvectordb>", .{});
+        std.debug.print(" ", .{});
         // takeDelimiter consomme aussi le '\n', contrairement à
         // takeDelimiterExclusive, et retourne null à la fin de l'entrée.
         const maybe_line = try reader.interface.takeDelimiter('\n');
@@ -51,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, command, "help")) {
             printHelp();
         } else if (std.mem.eql(u8, command, "stats")) {
-            std.debug.print("Documents: {d} | termes indexés: {d} | longueur moyenne: {d:.2} | vecteurs: {d} x {d}\n", .{
+            printColored(ansi.cyan, "Documents: {d} | termes indexés: {d} | longueur moyenne: {d:.2} | vecteurs: {d} x {d}\n", .{
                 index.total_documents,
                 index.total_terms,
                 index.averageDocumentLength(),
@@ -63,67 +85,67 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, command, "search-and ")) {
             var terms = std.mem.tokenizeAny(u8, command[11..], " \t");
             const left = terms.next() orelse {
-                std.debug.print("Usage: search-and <mot1> <mot2>\n", .{});
+                printColored(ansi.red, "Usage: search-and <mot1> <mot2>\n", .{});
                 continue;
             };
             const right = terms.next() orelse {
-                std.debug.print("Usage: search-and <mot1> <mot2>\n", .{});
+                printColored(ansi.red, "Usage: search-and <mot1> <mot2>\n", .{});
                 continue;
             };
             const matches = try index.searchAnd(left, right);
             defer allocator.free(matches);
-            if (matches.len == 0) std.debug.print("Aucun document ne contient les deux termes.\n", .{});
-            for (matches) |id| std.debug.print("[{d}] {s}\n", .{ id, documents.items[id].content });
+            if (matches.len == 0) printColored(ansi.yellow, "Aucun document ne contient les deux termes.\n", .{});
+            for (matches) |id| printColored(ansi.cyan, "[{d}] {s}\n", .{ id, documents.items[id].content });
         } else if (std.mem.startsWith(u8, command, "dimension ")) {
             if (vector_index.count != 0) {
-                std.debug.print("Dimension verrouillée après la première insertion.\n", .{});
+                printColored(ansi.yellow, "Dimension verrouillée après la première insertion.\n", .{});
                 continue;
             }
             const dimension = std.fmt.parseInt(usize, std.mem.trim(u8, command[9..], " \t"), 10) catch {
-                std.debug.print("Usage: dimension <entier positif>\n", .{});
+                printColored(ansi.red, "Usage: dimension <entier positif>\n", .{});
                 continue;
             };
             if (dimension == 0) continue;
             vector_index.dimension = dimension;
-            std.debug.print("Dimension vectorielle: {d}\n", .{dimension});
+            printColored(ansi.green, "Dimension vectorielle: {d}\n", .{dimension});
         } else if (std.mem.startsWith(u8, command, "vadd ")) {
             const values = parseVector(allocator, command[5..]) catch {
-                std.debug.print("Vecteur CSV invalide; dimension attendue: {d}.\n", .{vector_index.dimension});
+                printColored(ansi.red, "Vecteur CSV invalide; dimension attendue: {d}.\n", .{vector_index.dimension});
                 continue;
             };
             defer allocator.free(values);
             if (values.len != vector_index.dimension) {
-                std.debug.print("Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ vector_index.dimension, values.len });
+                printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ vector_index.dimension, values.len });
                 continue;
             }
             const id = try vector_index.add(values);
-            std.debug.print("Vecteur {d} ajouté.\n", .{id});
+            printColored(ansi.green, "Vecteur {d} ajouté.\n", .{id});
         } else if (std.mem.startsWith(u8, command, "vsearch ")) {
             const values = parseVector(allocator, command[8..]) catch {
-                std.debug.print("Usage: vsearch <valeur1,valeur2,...>\n", .{});
+                printColored(ansi.red, "Usage: vsearch <valeur1,valeur2,...>\n", .{});
                 continue;
             };
             defer allocator.free(values);
             if (values.len != vector_index.dimension) {
-                std.debug.print("Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ vector_index.dimension, values.len });
+                printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ vector_index.dimension, values.len });
                 continue;
             }
             const results = try vector_index.search(values, allocator, 5);
             defer allocator.free(results);
-            if (results.len == 0) std.debug.print("Index vectoriel vide.\n", .{});
-            for (results) |result| std.debug.print("[{d}] similarité cosinus {d:.5}\n", .{ result.id, result.score });
+            if (results.len == 0) printColored(ansi.yellow, "Index vectoriel vide.\n", .{});
+            for (results) |result| printColored(ansi.cyan, "[{d}] similarité cosinus {d:.5}\n", .{ result.id, result.score });
         } else if (std.mem.startsWith(u8, command, "hsearch ")) {
             const values = parseVector(allocator, command[8..]) catch {
-                std.debug.print("Usage: hsearch <valeur1,valeur2,...>\n", .{});
+                printColored(ansi.red, "Usage: hsearch <valeur1,valeur2,...>\n", .{});
                 continue;
             };
             defer allocator.free(values);
             if (values.len != vector_index.dimension) {
-                std.debug.print("Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ vector_index.dimension, values.len });
+                printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ vector_index.dimension, values.len });
                 continue;
             }
             if (vector_index.count == 0) {
-                std.debug.print("Index vectoriel vide.\n", .{});
+                printColored(ansi.yellow, "Index vectoriel vide.\n", .{});
                 continue;
             }
             var random_state = std.Random.DefaultPrng.init(42);
@@ -139,11 +161,11 @@ pub fn main(init: std.process.Init) !void {
             var distance_stats = @import("vector.zig").DistanceStats{};
             const results = try hnsw.search(converted, allocator, 5, &distance_stats);
             defer allocator.free(results);
-            for (results) |result| std.debug.print("[{d}] similarité cosinus {d:.5}\n", .{ result.id, result.score });
-            std.debug.print("Comparaisons: {d}; HNSW est reconstruit à chaque requête.\n", .{distance_stats.comparisons});
+            for (results) |result| printColored(ansi.cyan, "[{d}] similarité cosinus {d:.5}\n", .{ result.id, result.score });
+            printColored(ansi.yellow, "Comparaisons: {d}; HNSW est reconstruit à chaque requête.\n", .{distance_stats.comparisons});
         } else if (std.mem.startsWith(u8, command, "quantize ")) {
             const values = parseVector(allocator, command[9..]) catch {
-                std.debug.print("Usage: quantize <valeur1,valeur2,...>\n", .{});
+                printColored(ansi.red, "Usage: quantize <valeur1,valeur2,...>\n", .{});
                 continue;
             };
             defer allocator.free(values);
@@ -152,13 +174,13 @@ pub fn main(init: std.process.Init) !void {
             for (values, 0..) |value, i| f32_values[i] = @floatCast(value);
             const quantized = try quantize(allocator, f32_values);
             defer allocator.free(quantized.values);
-            std.debug.print("INT8 scale={d:.6}: ", .{quantized.scale});
+            printColored(ansi.cyan, "INT8 scale={d:.6}: ", .{quantized.scale});
             for (quantized.values, 0..) |value, i| std.debug.print("{s}{d}", .{ if (i == 0) "" else ",", value });
             std.debug.print("\n", .{});
         } else if (std.mem.startsWith(u8, command, "train ")) {
             var arguments = std.mem.tokenizeAny(u8, command[6..], " \t");
             const word = arguments.next() orelse {
-                std.debug.print("Usage: train <mot> [epochs]\n", .{});
+                printColored(ansi.red, "Usage: train <mot> [epochs]\n", .{});
                 continue;
             };
             const epochs = if (arguments.next()) |raw|
@@ -166,17 +188,17 @@ pub fn main(init: std.process.Init) !void {
             else
                 100;
             if (documents.items.len == 0) {
-                std.debug.print("Ajoutez d'abord des documents avec 'add'.\n", .{});
+                printColored(ansi.yellow, "Ajoutez d'abord des documents avec 'add'.\n", .{});
                 continue;
             }
             try trainAndShowSimilar(allocator, documents.items, word, epochs);
         } else if (std.mem.eql(u8, command, "list")) {
-            if (documents.items.len == 0) std.debug.print("Aucun document. Ajoutez-en avec: add <texte>\n", .{});
-            for (documents.items, 0..) |doc, id| std.debug.print("[{d}] {s}\n", .{ id, doc.content });
+            if (documents.items.len == 0) printColored(ansi.yellow, "Aucun document. Ajoutez-en avec: add <texte>\n", .{});
+            for (documents.items, 0..) |doc, id| printColored(ansi.cyan, "[{d}] {s}\n", .{ id, doc.content });
         } else if (std.mem.startsWith(u8, command, "add ")) {
             const content = std.mem.trim(u8, command[4..], " \t\r");
             if (content.len == 0) {
-                std.debug.print("Usage: add <texte du document>\n", .{});
+                printColored(ansi.red, "Usage: add <texte du document>\n", .{});
                 continue;
             }
             const owned = try allocator.dupe(u8, content);
@@ -187,29 +209,29 @@ pub fn main(init: std.process.Init) !void {
             try index.addDocument(id, tokens.len);
             for (tokens) |token| try index.add(token, id);
             try documents.append(allocator, .{ .content = owned });
-            std.debug.print("Document {d} ajouté ({d} termes).\n", .{ id, tokens.len });
+            printColored(ansi.green, "Document {d} ajouté ({d} termes).\n", .{ id, tokens.len });
         } else if (std.mem.startsWith(u8, command, "search ")) {
             const query = std.mem.trim(u8, command[7..], " \t\r");
             if (query.len == 0) {
-                std.debug.print("Usage: search <requête>\n", .{});
+                printColored(ansi.red, "Usage: search <requête>\n", .{});
                 continue;
             }
             const results = try search_engine.search(query);
             defer allocator.free(results);
             if (results.len == 0) {
-                std.debug.print("Aucun résultat pour « {s} ».\n", .{query});
+                printColored(ansi.yellow, "Aucun résultat pour « {s} ».\n", .{query});
             } else {
-                for (results) |result| std.debug.print("[{d}] score {d:.4} — {s}\n", .{
+                for (results) |result| printColored(ansi.cyan, "[{d}] score {d:.4} — {s}\n", .{
                     result.document_id,
                     result.score,
                     documents.items[result.document_id].content,
                 });
             }
         } else {
-            std.debug.print("Commande inconnue. Tapez 'help'.\n", .{});
+            printColored(ansi.red, "Commande inconnue. Tapez 'help'.\n", .{});
         }
     }
-    std.debug.print("À bientôt.\n", .{});
+    printColored(ansi.green, "À bientôt.\n", .{});
 }
 
 fn enableWindowsUtf8Console() ConsoleCodePages {
@@ -219,16 +241,33 @@ fn enableWindowsUtf8Console() ConsoleCodePages {
         const original = ConsoleCodePages{
             .input = GetConsoleCP(),
             .output = GetConsoleOutputCP(),
+            .stderr_handle = null,
+            .stderr_mode = null,
         };
         _ = SetConsoleOutputCP(65001);
         _ = SetConsoleCP(65001);
+        colors_enabled = false;
+        if (GetStdHandle(std_error_handle)) |handle| {
+            var mode: u32 = 0;
+            if (GetConsoleMode(handle, &mode) != 0 and
+                SetConsoleMode(handle, mode | enable_virtual_terminal_processing) != 0)
+            {
+                colors_enabled = true;
+                return .{
+                    .input = original.input,
+                    .output = original.output,
+                    .stderr_handle = handle,
+                    .stderr_mode = mode,
+                };
+            }
+        }
         return original;
     }
-    return .{ .input = 0, .output = 0 };
+    return .{ .input = 0, .output = 0, .stderr_handle = null, .stderr_mode = null };
 }
 
 fn printBanner() void {
-    std.debug.print(
+    printColored(ansi.cyan_bold,
         \\
         \\ ZZZZZZ  V     V EEEEE CCCCC TTTTT OOOOO RRRR  DDDD  BBBB
         \\     ZZ  V     V E     C       T   O   O R   R D   D B   B
@@ -246,13 +285,16 @@ fn printBanner() void {
 
 fn restoreConsoleCodePages(original: ConsoleCodePages) void {
     if (comptime builtin.os.tag == .windows) {
+        if (original.stderr_handle) |handle| {
+            if (original.stderr_mode) |mode| _ = SetConsoleMode(handle, mode);
+        }
         if (original.output != 0) _ = SetConsoleOutputCP(original.output);
         if (original.input != 0) _ = SetConsoleCP(original.input);
     }
 }
 
 fn printHelp() void {
-    std.debug.print(
+    printColored(ansi.cyan,
         \\Commandes disponibles:
         \\  add <texte>     Indexer un document en mémoire
         \\  search <texte>  Chercher avec le classement BM25
@@ -270,6 +312,12 @@ fn printHelp() void {
         \\  quit / exit     Quitter
         \\
     , .{});
+}
+
+fn printColored(color: []const u8, comptime format: []const u8, args: anytype) void {
+    if (colors_enabled) std.debug.print("{s}", .{color});
+    std.debug.print(format, args);
+    if (colors_enabled) std.debug.print("{s}", .{ansi.reset});
 }
 
 fn parseVector(allocator: std.mem.Allocator, text: []const u8) ![]f64 {
@@ -299,11 +347,11 @@ fn trainAndShowSimilar(
         for (tokens) |token| _ = try vocabulary.add(token);
     }
     if (vocabulary.size() < 2) {
-        std.debug.print("Word2Vec exige au moins deux mots distincts.\n", .{});
+        printColored(ansi.yellow, "Word2Vec exige au moins deux mots distincts.\n", .{});
         return;
     }
     const query_id = vocabulary.getId(query_word) orelse {
-        std.debug.print("Mot absent du vocabulaire: {s}\n", .{query_word});
+        printColored(ansi.yellow, "Mot absent du vocabulaire: {s}\n", .{query_word});
         return;
     };
     var dataset = TrainingDataset.init(allocator);
@@ -314,7 +362,7 @@ fn trainAndShowSimilar(
         try dataset.buildFromTokens(&vocabulary, tokens, 2);
     }
     if (dataset.len() == 0) {
-        std.debug.print("Corpus trop court pour construire des paires de contexte.\n", .{});
+        printColored(ansi.yellow, "Corpus trop court pour construire des paires de contexte.\n", .{});
         return;
     }
     var sampler = try NegativeSampler.init(allocator, vocabulary.frequencies.items);
@@ -335,6 +383,6 @@ fn trainAndShowSimilar(
     }
     const similar = try model.mostSimilar(query_id, allocator, 5);
     defer allocator.free(similar);
-    std.debug.print("Voisins Word2Vec de '{s}' après {d} époques:\n", .{ query_word, passes });
-    for (similar) |item| std.debug.print("  {s}: {d:.5}\n", .{ vocabulary.getWord(item.id).?, item.score });
+    printColored(ansi.cyan, "Voisins Word2Vec de '{s}' après {d} époques:\n", .{ query_word, passes });
+    for (similar) |item| printColored(ansi.cyan, "  {s}: {d:.5}\n", .{ vocabulary.getWord(item.id).?, item.score });
 }
