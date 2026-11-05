@@ -10,6 +10,8 @@ Depuis la racine du projet:
 zig build run
 ```
 
+La CLI utilise des couleurs ANSI pour distinguer l'invite, les résultats, les messages d'erreur et les confirmations. Dans Windows Terminal, le mode ANSI est activé automatiquement.
+
 La CLI interactive indexe les documents en mémoire et les classe avec BM25:
 
 ```text
