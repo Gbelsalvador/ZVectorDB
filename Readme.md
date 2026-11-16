@@ -12,7 +12,7 @@ zig build run
 
 La CLI utilise des couleurs ANSI pour distinguer l'invite, les résultats, les messages d'erreur et les confirmations. Dans Windows Terminal, le mode ANSI est activé automatiquement.
 
-La CLI interactive indexe les documents en mémoire et les classe avec BM25:
+La CLI interactive indexe les documents et les classe avec BM25. Les documents et les vecteurs sont enregistrés automatiquement dans `zvectordb.db` après chaque insertion, puis restaurés au prochain lancement:
 
 ```text
 zvectordb> add Zig est un langage de programmation système
@@ -39,4 +39,4 @@ zvectordb> train langage 100
 
 `vsearch` fait une recherche exacte par similarité cosinus. `hsearch` exerce HNSW, mais reconstruit son graphe à chaque requête: c'est une commande de démonstration, pas encore une configuration persistante/performante. `quantize` affiche les valeurs INT8 et le facteur d'échelle.
 
-`train <mot> [époques]` entraîne un modèle Word2Vec sur les documents de la session et affiche les cinq voisins du mot. Les documents, modèles et vecteurs restent en mémoire pendant la session. Le stockage WAL/snapshot et mmap existent comme modules expérimentaux, mais ne sont pas reliés à la CLI.
+`train <mot> [époques]` entraîne un modèle Word2Vec sur les documents et affiche les cinq voisins du mot. Le modèle Word2Vec reste temporaire; les documents et les vecteurs de la CLI sont conservés dans `zvectordb.db`, dans le répertoire courant. Le stockage WAL/snapshot et mmap existent comme modules expérimentaux séparés.

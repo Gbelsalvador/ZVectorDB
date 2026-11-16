@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const storage = @import("storage.zig");
 const InvertedIndex = @import("inverted_index.zig").InvertedIndex;
 const SearchEngine = @import("search_engine.zig").SearchEngine;
 const VectorIndex = @import("vector_index.zig").vectorindex;
@@ -55,6 +56,28 @@ pub fn main(init: std.process.Init) !void {
     defer {
         for (documents.items) |doc| allocator.free(doc.content);
         documents.deinit(allocator);
+    }
+
+    if (storage.readDatabase(init.io, allocator, "zvectordb.db")) |loaded_database| {
+        var database = loaded_database;
+        defer database.deinit(allocator);
+        vector_index.dimension = database.dimension;
+        for (database.documents) |content| {
+            const owned = try allocator.dupe(u8, content);
+            errdefer allocator.free(owned);
+            const id = documents.items.len;
+            const tokens = try search_engine.tokenizer.tokenize(content);
+            defer search_engine.tokenizer.freeTokens(tokens);
+            try index.addDocument(id, tokens.len);
+            for (tokens) |token| try index.add(token, id);
+            try documents.append(allocator, .{ .content = owned });
+        }
+        try vector_index.vectors.appendSlice(allocator, database.vectors);
+        vector_index.count = database.vectors.len / database.dimension;
+        printColored(ansi.green, "Base restaurée: {d} documents, {d} vecteurs.\n", .{ documents.items.len, vector_index.count });
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
     }
 
     printBanner();
@@ -119,6 +142,7 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             }
             const id = try vector_index.add(values);
+            try persistDatabase(init.io, allocator, documents.items, &vector_index);
             printColored(ansi.green, "Vecteur {d} ajouté.\n", .{id});
         } else if (std.mem.startsWith(u8, command, "vsearch ")) {
             const values = parseVector(allocator, command[8..]) catch {
@@ -209,6 +233,7 @@ pub fn main(init: std.process.Init) !void {
             try index.addDocument(id, tokens.len);
             for (tokens) |token| try index.add(token, id);
             try documents.append(allocator, .{ .content = owned });
+            try persistDatabase(init.io, allocator, documents.items, &vector_index);
             printColored(ansi.green, "Document {d} ajouté ({d} termes).\n", .{ id, tokens.len });
         } else if (std.mem.startsWith(u8, command, "search ")) {
             const query = std.mem.trim(u8, command[7..], " \t\r");
@@ -330,6 +355,18 @@ fn parseVector(allocator: std.mem.Allocator, text: []const u8) ![]f64 {
     }
     if (values.items.len == 0) return error.EmptyVector;
     return values.toOwnedSlice(allocator);
+}
+
+fn persistDatabase(
+    io: anytype,
+    allocator: std.mem.Allocator,
+    documents: []const Document,
+    vector_index: *const VectorIndex,
+) !void {
+    const contents = try allocator.alloc([]const u8, documents.len);
+    defer allocator.free(contents);
+    for (documents, 0..) |document, i| contents[i] = document.content;
+    try storage.writeDatabase(io, "zvectordb.db", contents, vector_index.vectors.items, vector_index.dimension);
 }
 
 fn trainAndShowSimilar(
