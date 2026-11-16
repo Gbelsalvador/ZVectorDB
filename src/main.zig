@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const storage = @import("storage.zig");
 const InvertedIndex = @import("inverted_index.zig").InvertedIndex;
 const SearchEngine = @import("search_engine.zig").SearchEngine;
 const VectorIndex = @import("vector_index.zig").vectorindex;
@@ -55,6 +56,28 @@ pub fn main(init: std.process.Init) !void {
     defer {
         for (documents.items) |doc| allocator.free(doc.content);
         documents.deinit(allocator);
+    }
+
+    if (storage.readDatabase(init.io, allocator, "zvectordb.db")) |loaded_database| {
+        var database = loaded_database;
+        defer database.deinit(allocator);
+        vector_index.dimension = database.dimension;
+        for (database.documents) |content| {
+            const owned = try allocator.dupe(u8, content);
+            errdefer allocator.free(owned);
+            const id = documents.items.len;
+            const tokens = try search_engine.tokenizer.tokenize(content);
+            defer search_engine.tokenizer.freeTokens(tokens);
+            try index.addDocument(id, tokens.len);
+            for (tokens) |token| try index.add(token, id);
+            try documents.append(allocator, .{ .content = owned });
+        }
+        try vector_index.vectors.appendSlice(allocator, database.vectors);
+        vector_index.count = database.vectors.len / database.dimension;
+        printColored(ansi.green, "Base restaurée: {d} documents, {d} vecteurs.\n", .{ documents.items.len, vector_index.count });
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
     }
 
     printBanner();
@@ -119,7 +142,52 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             }
             const id = try vector_index.add(values);
+            try persistDatabase(init.io, allocator, documents.items, &vector_index);
             printColored(ansi.green, "Vecteur {d} ajouté.\n", .{id});
+        } else if (std.mem.startsWith(u8, command, "vdelete ")) {
+            const id = std.fmt.parseInt(usize, std.mem.trim(u8, command[8..], " \t"), 10) catch {
+                printColored(ansi.red, "Usage: vdelete <id>\n", .{});
+                continue;
+            };
+            if (id >= vector_index.count) {
+                printColored(ansi.yellow, "Vecteur {d} introuvable.\n", .{id});
+                continue;
+            }
+            const start = id * vector_index.dimension;
+            const end = start + vector_index.dimension;
+            const remaining = vector_index.vectors.items.len - vector_index.dimension;
+            std.mem.copyForwards(f64, vector_index.vectors.items[start..remaining], vector_index.vectors.items[end..]);
+            vector_index.vectors.items.len = remaining;
+            vector_index.count -= 1;
+            try persistDatabase(init.io, allocator, documents.items, &vector_index);
+            printColored(ansi.green, "Vecteur {d} supprimé.\n", .{id});
+        } else if (std.mem.startsWith(u8, command, "vupdate ")) {
+            const arguments = command[8..];
+            const separator = std.mem.indexOfAny(u8, arguments, " \t") orelse {
+                printColored(ansi.red, "Usage: vupdate <id> <valeur1,valeur2,...>\n", .{});
+                continue;
+            };
+            const id = std.fmt.parseInt(usize, std.mem.trim(u8, arguments[0..separator], " \t"), 10) catch {
+                printColored(ansi.red, "Usage: vupdate <id> <valeur1,valeur2,...>\n", .{});
+                continue;
+            };
+            if (id >= vector_index.count) {
+                printColored(ansi.yellow, "Vecteur {d} introuvable.\n", .{id});
+                continue;
+            }
+            const values = parseVector(allocator, std.mem.trim(u8, arguments[separator..], " \t")) catch {
+                printColored(ansi.red, "Vecteur CSV invalide.\n", .{});
+                continue;
+            };
+            defer allocator.free(values);
+            if (values.len != vector_index.dimension) {
+                printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ vector_index.dimension, values.len });
+                continue;
+            }
+            const start = id * vector_index.dimension;
+            @memcpy(vector_index.vectors.items[start .. start + vector_index.dimension], values);
+            try persistDatabase(init.io, allocator, documents.items, &vector_index);
+            printColored(ansi.green, "Vecteur {d} modifié.\n", .{id});
         } else if (std.mem.startsWith(u8, command, "vsearch ")) {
             const values = parseVector(allocator, command[8..]) catch {
                 printColored(ansi.red, "Usage: vsearch <valeur1,valeur2,...>\n", .{});
@@ -195,6 +263,41 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, command, "list")) {
             if (documents.items.len == 0) printColored(ansi.yellow, "Aucun document. Ajoutez-en avec: add <texte>\n", .{});
             for (documents.items, 0..) |doc, id| printColored(ansi.cyan, "[{d}] {s}\n", .{ id, doc.content });
+        } else if (std.mem.startsWith(u8, command, "delete ")) {
+            const id = std.fmt.parseInt(usize, std.mem.trim(u8, command[7..], " \t"), 10) catch {
+                printColored(ansi.red, "Usage: delete <id>\n", .{});
+                continue;
+            };
+            if (id >= documents.items.len) {
+                printColored(ansi.yellow, "Document {d} introuvable.\n", .{id});
+                continue;
+            }
+            const removed = documents.orderedRemove(id);
+            allocator.free(removed.content);
+            try rebuildTextIndex(allocator, &index, &search_engine, documents.items);
+            try persistDatabase(init.io, allocator, documents.items, &vector_index);
+            printColored(ansi.green, "Document {d} supprimé.\n", .{id});
+        } else if (std.mem.startsWith(u8, command, "update ")) {
+            const arguments = command[7..];
+            const separator = std.mem.indexOfAny(u8, arguments, " \t") orelse {
+                printColored(ansi.red, "Usage: update <id> <nouveau texte>\n", .{});
+                continue;
+            };
+            const id = std.fmt.parseInt(usize, std.mem.trim(u8, arguments[0..separator], " \t"), 10) catch {
+                printColored(ansi.red, "Usage: update <id> <nouveau texte>\n", .{});
+                continue;
+            };
+            const content = std.mem.trim(u8, arguments[separator..], " \t");
+            if (id >= documents.items.len or content.len == 0) {
+                printColored(ansi.yellow, "Document introuvable ou texte vide.\n", .{});
+                continue;
+            }
+            const owned = try allocator.dupe(u8, content);
+            allocator.free(documents.items[id].content);
+            documents.items[id].content = owned;
+            try rebuildTextIndex(allocator, &index, &search_engine, documents.items);
+            try persistDatabase(init.io, allocator, documents.items, &vector_index);
+            printColored(ansi.green, "Document {d} modifié.\n", .{id});
         } else if (std.mem.startsWith(u8, command, "add ")) {
             const content = std.mem.trim(u8, command[4..], " \t\r");
             if (content.len == 0) {
@@ -209,6 +312,7 @@ pub fn main(init: std.process.Init) !void {
             try index.addDocument(id, tokens.len);
             for (tokens) |token| try index.add(token, id);
             try documents.append(allocator, .{ .content = owned });
+            try persistDatabase(init.io, allocator, documents.items, &vector_index);
             printColored(ansi.green, "Document {d} ajouté ({d} termes).\n", .{ id, tokens.len });
         } else if (std.mem.startsWith(u8, command, "search ")) {
             const query = std.mem.trim(u8, command[7..], " \t\r");
@@ -301,9 +405,13 @@ fn printHelp() void {
         \\  search-and <a> <b> Intersection de deux termes
         \\  index           Afficher l'index lexical et ses postings
         \\  list            Afficher les documents
+        \\  update <id> <texte> Modifier un document
+        \\  delete <id>     Supprimer un document
         \\  stats           Afficher les statistiques de l'index
         \\  dimension <n>   Définir la dimension avant ajout de vecteurs
         \\  vadd <csv>      Ajouter un vecteur, ex: vadd 1,0,0
+        \\  vupdate <id> <csv> Modifier un vecteur
+        \\  vdelete <id>    Supprimer un vecteur
         \\  vsearch <csv>   Recherche exacte top 5 par cosinus
         \\  hsearch <csv>   Recherche top 5 HNSW (reconstruit par requête)
         \\  quantize <csv>  Quantifier un vecteur en INT8
@@ -330,6 +438,34 @@ fn parseVector(allocator: std.mem.Allocator, text: []const u8) ![]f64 {
     }
     if (values.items.len == 0) return error.EmptyVector;
     return values.toOwnedSlice(allocator);
+}
+
+fn persistDatabase(
+    io: anytype,
+    allocator: std.mem.Allocator,
+    documents: []const Document,
+    vector_index: *const VectorIndex,
+) !void {
+    const contents = try allocator.alloc([]const u8, documents.len);
+    defer allocator.free(contents);
+    for (documents, 0..) |document, i| contents[i] = document.content;
+    try storage.writeDatabase(io, "zvectordb.db", contents, vector_index.vectors.items, vector_index.dimension);
+}
+
+fn rebuildTextIndex(
+    allocator: std.mem.Allocator,
+    index: *InvertedIndex,
+    search_engine: *SearchEngine,
+    documents: []const Document,
+) !void {
+    index.deinit();
+    index.* = InvertedIndex.init(allocator);
+    for (documents, 0..) |document, id| {
+        const tokens = try search_engine.tokenizer.tokenize(document.content);
+        defer search_engine.tokenizer.freeTokens(tokens);
+        try index.addDocument(id, tokens.len);
+        for (tokens) |token| try index.add(token, id);
+    }
 }
 
 fn trainAndShowSimilar(

@@ -4,3 +4,5 @@ zig-out/
 test/
 *.exe
 *.pdb
+*.db
+release.md
