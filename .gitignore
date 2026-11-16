@@ -5,3 +5,4 @@ test/
 *.exe
 *.pdb
 *.db
+release.md
