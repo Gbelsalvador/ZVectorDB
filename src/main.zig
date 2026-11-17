@@ -10,6 +10,10 @@ const Vocabulary = @import("vocabulary.zig").Vocabulary;
 const TrainingDataset = @import("training_dataset.zig").TrainingDataset;
 const NegativeSampler = @import("negative_sampler.zig").NegativeSampler;
 const Word2vec = @import("word2vec.zig").Word2vec;
+const hnsw_m = 16;
+const hnsw_ef_construction = 64;
+const hnsw_ef_search = 32;
+const hnsw_path = "zvectordb.hnsw";
 
 extern "kernel32" fn SetConsoleOutputCP(code_page: u32) callconv(.winapi) i32;
 extern "kernel32" fn SetConsoleCP(code_page: u32) callconv(.winapi) i32;
@@ -80,6 +84,9 @@ pub fn main(init: std.process.Init) !void {
         else => return err,
     }
 
+    var hnsw = try loadOrBuildHnsw(init.io, allocator, &vector_index);
+    defer hnsw.deinit();
+
     printBanner();
     var input_buffer: [4096]u8 = undefined;
     var reader = std.Io.File.stdin().reader(init.io, &input_buffer);
@@ -130,6 +137,9 @@ pub fn main(init: std.process.Init) !void {
             };
             if (dimension == 0) continue;
             vector_index.dimension = dimension;
+            hnsw.deinit();
+            hnsw = HNSW.init(allocator, dimension, hnsw_m, hnsw_ef_construction, hnsw_ef_search);
+            try hnsw.save(init.io, hnsw_path, vector_index.vectors.items);
             printColored(ansi.green, "Dimension vectorielle: {d}\n", .{dimension});
         } else if (std.mem.startsWith(u8, command, "vadd ")) {
             const values = parseVector(allocator, command[5..]) catch {
@@ -142,7 +152,8 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             }
             const id = try vector_index.add(values);
-            try persistDatabase(init.io, allocator, documents.items, &vector_index);
+            try insertHnswVector(allocator, &hnsw, values, id);
+            try persistVectorData(init.io, allocator, documents.items, &vector_index, &hnsw);
             printColored(ansi.green, "Vecteur {d} ajouté.\n", .{id});
         } else if (std.mem.startsWith(u8, command, "vdelete ")) {
             const id = std.fmt.parseInt(usize, std.mem.trim(u8, command[8..], " \t"), 10) catch {
@@ -159,7 +170,8 @@ pub fn main(init: std.process.Init) !void {
             std.mem.copyForwards(f64, vector_index.vectors.items[start..remaining], vector_index.vectors.items[end..]);
             vector_index.vectors.items.len = remaining;
             vector_index.count -= 1;
-            try persistDatabase(init.io, allocator, documents.items, &vector_index);
+            try rebuildHnsw(allocator, &hnsw, &vector_index);
+            try persistVectorData(init.io, allocator, documents.items, &vector_index, &hnsw);
             printColored(ansi.green, "Vecteur {d} supprimé.\n", .{id});
         } else if (std.mem.startsWith(u8, command, "vupdate ")) {
             const arguments = command[8..];
@@ -186,7 +198,8 @@ pub fn main(init: std.process.Init) !void {
             }
             const start = id * vector_index.dimension;
             @memcpy(vector_index.vectors.items[start .. start + vector_index.dimension], values);
-            try persistDatabase(init.io, allocator, documents.items, &vector_index);
+            try rebuildHnsw(allocator, &hnsw, &vector_index);
+            try persistVectorData(init.io, allocator, documents.items, &vector_index, &hnsw);
             printColored(ansi.green, "Vecteur {d} modifié.\n", .{id});
         } else if (std.mem.startsWith(u8, command, "vsearch ")) {
             const values = parseVector(allocator, command[8..]) catch {
@@ -216,21 +229,14 @@ pub fn main(init: std.process.Init) !void {
                 printColored(ansi.yellow, "Index vectoriel vide.\n", .{});
                 continue;
             }
-            var random_state = std.Random.DefaultPrng.init(42);
-            var hnsw = HNSW.init(allocator, vector_index.dimension, 16, 64, 32);
-            defer hnsw.deinit();
             const converted = try allocator.alloc(f32, vector_index.dimension);
             defer allocator.free(converted);
-            for (0..vector_index.count) |id| {
-                for (vector_index.get(id), 0..) |value, i| converted[i] = @floatCast(value);
-                _ = try hnsw.insert(converted, random_state.random());
-            }
             for (values, 0..) |value, i| converted[i] = @floatCast(value);
             var distance_stats = @import("vector.zig").DistanceStats{};
             const results = try hnsw.search(converted, allocator, 5, &distance_stats);
             defer allocator.free(results);
             for (results) |result| printColored(ansi.cyan, "[{d}] similarité cosinus {d:.5}\n", .{ result.id, result.score });
-            printColored(ansi.yellow, "Comparaisons: {d}; HNSW est reconstruit à chaque requête.\n", .{distance_stats.comparisons});
+            printColored(ansi.yellow, "Comparaisons: {d}; graphe HNSW persistant.\n", .{distance_stats.comparisons});
         } else if (std.mem.startsWith(u8, command, "quantize ")) {
             const values = parseVector(allocator, command[9..]) catch {
                 printColored(ansi.red, "Usage: quantize <valeur1,valeur2,...>\n", .{});
@@ -413,7 +419,7 @@ fn printHelp() void {
         \\  vupdate <id> <csv> Modifier un vecteur
         \\  vdelete <id>    Supprimer un vecteur
         \\  vsearch <csv>   Recherche exacte top 5 par cosinus
-        \\  hsearch <csv>   Recherche top 5 HNSW (reconstruit par requête)
+        \\  hsearch <csv>   Recherche top 5 dans le graphe HNSW persistant
         \\  quantize <csv>  Quantifier un vecteur en INT8
         \\  train <mot> [n] Entraîner Word2Vec sur les documents et voir les voisins
         \\  help            Afficher cette aide
@@ -450,6 +456,65 @@ fn persistDatabase(
     defer allocator.free(contents);
     for (documents, 0..) |document, i| contents[i] = document.content;
     try storage.writeDatabase(io, "zvectordb.db", contents, vector_index.vectors.items, vector_index.dimension);
+}
+
+fn loadOrBuildHnsw(io: anytype, allocator: std.mem.Allocator, vector_index: *const VectorIndex) !HNSW {
+    return HNSW.load(
+        io,
+        allocator,
+        hnsw_path,
+        vector_index.dimension,
+        hnsw_m,
+        hnsw_ef_construction,
+        hnsw_ef_search,
+        vector_index.vectors.items,
+    ) catch |err| switch (err) {
+        error.FileNotFound, error.StaleGraph, error.InvalidGraph, error.UnsupportedGraphVersion, error.EndOfStream => {
+            var graph = HNSW.init(allocator, vector_index.dimension, hnsw_m, hnsw_ef_construction, hnsw_ef_search);
+            errdefer graph.deinit();
+            try populateHnsw(allocator, &graph, vector_index);
+            try graph.save(io, hnsw_path, vector_index.vectors.items);
+            return graph;
+        },
+        else => return err,
+    };
+}
+
+fn rebuildHnsw(allocator: std.mem.Allocator, graph: *HNSW, vector_index: *const VectorIndex) !void {
+    graph.deinit();
+    graph.* = HNSW.init(allocator, vector_index.dimension, hnsw_m, hnsw_ef_construction, hnsw_ef_search);
+    try populateHnsw(allocator, graph, vector_index);
+}
+
+fn populateHnsw(allocator: std.mem.Allocator, graph: *HNSW, vector_index: *const VectorIndex) !void {
+    const converted = try allocator.alloc(f32, vector_index.dimension);
+    defer allocator.free(converted);
+    var random_state = std.Random.DefaultPrng.init(42);
+    for (0..vector_index.count) |id| {
+        const start = id * vector_index.dimension;
+        const stored = vector_index.vectors.items[start .. start + vector_index.dimension];
+        for (stored, 0..) |value, i| converted[i] = @floatCast(value);
+        _ = try graph.insert(converted, random_state.random());
+    }
+}
+
+fn insertHnswVector(allocator: std.mem.Allocator, graph: *HNSW, values: []const f64, id: usize) !void {
+    const converted = try allocator.alloc(f32, values.len);
+    defer allocator.free(converted);
+    for (values, 0..) |value, i| converted[i] = @floatCast(value);
+    var random_state = std.Random.DefaultPrng.init(@intCast(id + 42));
+    _ = try graph.insert(converted, random_state.random());
+}
+
+fn persistVectorData(
+    io: anytype,
+    allocator: std.mem.Allocator,
+    documents: []const Document,
+    vector_index: *const VectorIndex,
+    graph: *const HNSW,
+) !void {
+    try persistDatabase(io, allocator, documents, vector_index);
+    try graph.save(io, hnsw_path, vector_index.vectors.items);
 }
 
 fn rebuildTextIndex(
