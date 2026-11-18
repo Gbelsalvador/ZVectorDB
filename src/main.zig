@@ -5,11 +5,17 @@ const InvertedIndex = @import("inverted_index.zig").InvertedIndex;
 const SearchEngine = @import("search_engine.zig").SearchEngine;
 const VectorIndex = @import("vector_index.zig").vectorindex;
 const HNSW = @import("hnsw.zig").HNSW;
+const rrf = @import("rrf.zig");
+const QueryEngine = @import("query_engine.zig");
 const quantize = @import("quantifization.zig").quantize;
 const Vocabulary = @import("vocabulary.zig").Vocabulary;
 const TrainingDataset = @import("training_dataset.zig").TrainingDataset;
 const NegativeSampler = @import("negative_sampler.zig").NegativeSampler;
 const Word2vec = @import("word2vec.zig").Word2vec;
+const hnsw_m = 16;
+const hnsw_ef_construction = 64;
+const hnsw_ef_search = 32;
+const hnsw_path = "zvectordb.hnsw";
 
 extern "kernel32" fn SetConsoleOutputCP(code_page: u32) callconv(.winapi) i32;
 extern "kernel32" fn SetConsoleCP(code_page: u32) callconv(.winapi) i32;
@@ -80,6 +86,9 @@ pub fn main(init: std.process.Init) !void {
         else => return err,
     }
 
+    var hnsw = try loadOrBuildHnsw(init.io, allocator, &vector_index);
+    defer hnsw.deinit();
+
     printBanner();
     var input_buffer: [4096]u8 = undefined;
     var reader = std.Io.File.stdin().reader(init.io, &input_buffer);
@@ -130,6 +139,9 @@ pub fn main(init: std.process.Init) !void {
             };
             if (dimension == 0) continue;
             vector_index.dimension = dimension;
+            hnsw.deinit();
+            hnsw = HNSW.init(allocator, dimension, hnsw_m, hnsw_ef_construction, hnsw_ef_search);
+            try hnsw.save(init.io, hnsw_path, vector_index.vectors.items);
             printColored(ansi.green, "Dimension vectorielle: {d}\n", .{dimension});
         } else if (std.mem.startsWith(u8, command, "vadd ")) {
             const values = parseVector(allocator, command[5..]) catch {
@@ -142,7 +154,8 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             }
             const id = try vector_index.add(values);
-            try persistDatabase(init.io, allocator, documents.items, &vector_index);
+            try insertHnswVector(allocator, &hnsw, values, id);
+            try persistVectorData(init.io, allocator, documents.items, &vector_index, &hnsw);
             printColored(ansi.green, "Vecteur {d} ajouté.\n", .{id});
         } else if (std.mem.startsWith(u8, command, "vdelete ")) {
             const id = std.fmt.parseInt(usize, std.mem.trim(u8, command[8..], " \t"), 10) catch {
@@ -159,7 +172,8 @@ pub fn main(init: std.process.Init) !void {
             std.mem.copyForwards(f64, vector_index.vectors.items[start..remaining], vector_index.vectors.items[end..]);
             vector_index.vectors.items.len = remaining;
             vector_index.count -= 1;
-            try persistDatabase(init.io, allocator, documents.items, &vector_index);
+            try rebuildHnsw(allocator, &hnsw, &vector_index);
+            try persistVectorData(init.io, allocator, documents.items, &vector_index, &hnsw);
             printColored(ansi.green, "Vecteur {d} supprimé.\n", .{id});
         } else if (std.mem.startsWith(u8, command, "vupdate ")) {
             const arguments = command[8..];
@@ -186,7 +200,8 @@ pub fn main(init: std.process.Init) !void {
             }
             const start = id * vector_index.dimension;
             @memcpy(vector_index.vectors.items[start .. start + vector_index.dimension], values);
-            try persistDatabase(init.io, allocator, documents.items, &vector_index);
+            try rebuildHnsw(allocator, &hnsw, &vector_index);
+            try persistVectorData(init.io, allocator, documents.items, &vector_index, &hnsw);
             printColored(ansi.green, "Vecteur {d} modifié.\n", .{id});
         } else if (std.mem.startsWith(u8, command, "vsearch ")) {
             const values = parseVector(allocator, command[8..]) catch {
@@ -202,6 +217,150 @@ pub fn main(init: std.process.Init) !void {
             defer allocator.free(results);
             if (results.len == 0) printColored(ansi.yellow, "Index vectoriel vide.\n", .{});
             for (results) |result| printColored(ansi.cyan, "[{d}] similarité cosinus {d:.5}\n", .{ result.id, result.score });
+        } else if (std.mem.startsWith(u8, command, "query ")) {
+            const arguments = command[6..];
+            const vector_marker = std.mem.indexOf(u8, arguments, "--vector");
+            const text_query = if (vector_marker) |marker|
+                std.mem.trim(u8, arguments[0..marker], " \t")
+            else
+                std.mem.trim(u8, arguments, " \t");
+            var vector_values: ?[]f64 = null;
+            defer {
+                if (vector_values) |values| allocator.free(values);
+            }
+            if (vector_marker) |marker| {
+                const vector_query_text = std.mem.trim(u8, arguments[marker + "--vector".len ..], " \t");
+                if (vector_query_text.len == 0) {
+                    printColored(ansi.red, "Usage: query <texte> [--vector <csv>]\n", .{});
+                    continue;
+                }
+                vector_values = parseVector(allocator, vector_query_text) catch {
+                    printColored(ansi.red, "Vecteur CSV invalide.\n", .{});
+                    continue;
+                };
+            } else if (text_query.len == 0) {
+                printColored(ansi.red, "Usage: query <texte> [--vector <csv>]\n", .{});
+                continue;
+            }
+            if (vector_values) |values| {
+                if (values.len != vector_index.dimension) {
+                    printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ vector_index.dimension, values.len });
+                    continue;
+                }
+            }
+
+            const plan = QueryEngine.createPlan(
+                text_query,
+                vector_values != null,
+                documents.items.len,
+                vector_index.count,
+            );
+            printQueryPlan(plan);
+            if (!plan.use_bm25 and !plan.use_vector) {
+                printColored(ansi.yellow, "Aucune source de recherche disponible pour cette requête.\n", .{});
+                continue;
+            }
+            if (!plan.aligned_ids) {
+                printColored(ansi.yellow, "Exécution annulée: le nombre de documents et de vecteurs doit correspondre pour fusionner leurs identifiants.\n", .{});
+                continue;
+            }
+
+            var bm25_results: []@import("search_result.zig").SearchResult = &.{};
+            if (plan.use_bm25) {
+                bm25_results = try search_engine.search(text_query);
+            }
+            defer if (plan.use_bm25) allocator.free(bm25_results);
+
+            var vector_results: []@import("hnsw.zig").Candidate = &.{};
+            if (plan.use_vector) {
+                const converted = try allocator.alloc(f32, vector_index.dimension);
+                defer allocator.free(converted);
+                for (vector_values.?, 0..) |value, i| converted[i] = @floatCast(value);
+                var distance_stats = @import("vector.zig").DistanceStats{};
+                vector_results = try hnsw.search(converted, allocator, plan.vector_candidates, &distance_stats);
+            }
+            defer if (plan.use_vector) allocator.free(vector_results);
+
+            const results = try QueryEngine.fuseAndRerank(allocator, bm25_results, vector_results, plan);
+            defer allocator.free(results);
+            if (results.len == 0) {
+                printColored(ansi.yellow, "Aucun résultat pour cette requête.\n", .{});
+            } else {
+                for (results[0..@min(results.len, QueryEngine.ResultLimit)]) |result| {
+                    if (result.id < documents.items.len) {
+                        printColored(ansi.cyan, "[{d}] score {d:.5} — {s}\n", .{
+                            result.id,
+                            result.score,
+                            documents.items[result.id].content,
+                        });
+                    } else {
+                        printColored(ansi.cyan, "[{d}] score {d:.5} — vecteur sans document associé\n", .{ result.id, result.score });
+                    }
+                }
+            }
+        } else if (std.mem.startsWith(u8, command, "hybrid ")) {
+            const arguments = command[7..];
+            const vector_marker = std.mem.indexOf(u8, arguments, "--vector") orelse {
+                printColored(ansi.red, "Usage: hybrid <requête texte> --vector <valeur1,valeur2,...>\n", .{});
+                continue;
+            };
+            const text_query = std.mem.trim(u8, arguments[0..vector_marker], " \t");
+            const vector_query_text = std.mem.trim(u8, arguments[vector_marker + "--vector".len ..], " \t");
+            if (text_query.len == 0 or vector_query_text.len == 0) {
+                printColored(ansi.red, "Usage: hybrid <requête texte> --vector <valeur1,valeur2,...>\n", .{});
+                continue;
+            }
+            if (documents.items.len == 0 or vector_index.count == 0) {
+                printColored(ansi.yellow, "La recherche hybride exige des documents et des vecteurs.\n", .{});
+                continue;
+            }
+            if (documents.items.len != vector_index.count) {
+                printColored(ansi.yellow, "La recherche hybride exige un vecteur par document, dans le même ordre.\n", .{});
+                continue;
+            }
+            const values = parseVector(allocator, vector_query_text) catch {
+                printColored(ansi.red, "Vecteur CSV invalide.\n", .{});
+                continue;
+            };
+            defer allocator.free(values);
+            if (values.len != vector_index.dimension) {
+                printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ vector_index.dimension, values.len });
+                continue;
+            }
+
+            const text_results = try search_engine.search(text_query);
+            defer allocator.free(text_results);
+            const converted = try allocator.alloc(f32, vector_index.dimension);
+            defer allocator.free(converted);
+            for (values, 0..) |value, i| converted[i] = @floatCast(value);
+            var distance_stats = @import("vector.zig").DistanceStats{};
+            const vector_results = try hnsw.search(converted, allocator, 5, &distance_stats);
+            defer allocator.free(vector_results);
+
+            var scores = std.AutoHashMap(u64, f32).init(allocator);
+            defer scores.deinit();
+            const text_count = @min(text_results.len, 5);
+            for (text_results[0..text_count], 0..) |result, rank| {
+                try rrf.addRank(&scores, @intCast(result.document_id), rank + 1, 60);
+            }
+            for (vector_results, 0..) |result, rank| {
+                try rrf.addRank(&scores, @intCast(result.id), rank + 1, 60);
+            }
+
+            const results = try rrf.computeRRF(allocator, &scores);
+            defer allocator.free(results);
+            if (results.len == 0) {
+                printColored(ansi.yellow, "Aucun résultat hybride.\n", .{});
+            } else {
+                for (results[0..@min(results.len, 5)]) |result| {
+                    const id: usize = @intCast(result.doc_id);
+                    printColored(ansi.cyan, "[{d}] score RRF {d:.5} — {s}\n", .{
+                        id,
+                        result.score,
+                        documents.items[id].content,
+                    });
+                }
+            }
         } else if (std.mem.startsWith(u8, command, "hsearch ")) {
             const values = parseVector(allocator, command[8..]) catch {
                 printColored(ansi.red, "Usage: hsearch <valeur1,valeur2,...>\n", .{});
@@ -216,21 +375,14 @@ pub fn main(init: std.process.Init) !void {
                 printColored(ansi.yellow, "Index vectoriel vide.\n", .{});
                 continue;
             }
-            var random_state = std.Random.DefaultPrng.init(42);
-            var hnsw = HNSW.init(allocator, vector_index.dimension, 16, 64, 32);
-            defer hnsw.deinit();
             const converted = try allocator.alloc(f32, vector_index.dimension);
             defer allocator.free(converted);
-            for (0..vector_index.count) |id| {
-                for (vector_index.get(id), 0..) |value, i| converted[i] = @floatCast(value);
-                _ = try hnsw.insert(converted, random_state.random());
-            }
             for (values, 0..) |value, i| converted[i] = @floatCast(value);
             var distance_stats = @import("vector.zig").DistanceStats{};
             const results = try hnsw.search(converted, allocator, 5, &distance_stats);
             defer allocator.free(results);
             for (results) |result| printColored(ansi.cyan, "[{d}] similarité cosinus {d:.5}\n", .{ result.id, result.score });
-            printColored(ansi.yellow, "Comparaisons: {d}; HNSW est reconstruit à chaque requête.\n", .{distance_stats.comparisons});
+            printColored(ansi.yellow, "Comparaisons: {d}; graphe HNSW persistant.\n", .{distance_stats.comparisons});
         } else if (std.mem.startsWith(u8, command, "quantize ")) {
             const values = parseVector(allocator, command[9..]) catch {
                 printColored(ansi.red, "Usage: quantize <valeur1,valeur2,...>\n", .{});
@@ -413,13 +565,33 @@ fn printHelp() void {
         \\  vupdate <id> <csv> Modifier un vecteur
         \\  vdelete <id>    Supprimer un vecteur
         \\  vsearch <csv>   Recherche exacte top 5 par cosinus
-        \\  hsearch <csv>   Recherche top 5 HNSW (reconstruit par requête)
+        \\  hsearch <csv>   Recherche top 5 dans le graphe HNSW persistant
+        \\  hybrid <texte> --vector <csv> Fusion BM25/HNSW, un vecteur par document
+        \\  query <texte> [--vector <csv>] Planifier puis exécuter (top 10)
         \\  quantize <csv>  Quantifier un vecteur en INT8
         \\  train <mot> [n] Entraîner Word2Vec sur les documents et voir les voisins
         \\  help            Afficher cette aide
         \\  quit / exit     Quitter
         \\
     , .{});
+}
+
+fn printQueryPlan(plan: QueryEngine.Plan) void {
+    printColored(ansi.yellow, "Plan du query engine:\n", .{});
+    printColored(ansi.cyan, "  1. Filtres: aucun (pas de métadonnées indexées).\n", .{});
+    printColored(ansi.cyan, "  2. Candidats BM25: {d} (maximum 50).\n", .{plan.bm25_candidates});
+    printColored(ansi.cyan, "  3. Candidats HNSW: {d} (maximum 50).\n", .{plan.vector_candidates});
+    printColored(ansi.cyan, "  4. Recherche vectorielle: {s}.\n", .{if (plan.use_vector) "oui" else "non"});
+    printColored(ansi.cyan, "  5. Recherche BM25: {s}.\n", .{if (plan.use_bm25) "oui" else "non"});
+    if (plan.usesBothSources() and plan.aligned_ids) {
+        printColored(ansi.cyan, "  6. Fusion: RRF (k=60), puis reranking.\n", .{});
+    } else if (plan.usesBothSources()) {
+        printColored(ansi.cyan, "  6. Fusion: impossible tant que les identifiants document/vecteur ne sont pas alignés.\n", .{});
+    } else {
+        printColored(ansi.cyan, "  6. Fusion: aucune, une seule source active.\n", .{});
+    }
+    printColored(ansi.cyan, "  7. Reranking: scores min-max normalisés; poids 50/50 si les deux sources ont des résultats.\n", .{});
+    printColored(ansi.cyan, "  8. Résultats: top {d}.\n", .{QueryEngine.ResultLimit});
 }
 
 fn printColored(color: []const u8, comptime format: []const u8, args: anytype) void {
@@ -450,6 +622,65 @@ fn persistDatabase(
     defer allocator.free(contents);
     for (documents, 0..) |document, i| contents[i] = document.content;
     try storage.writeDatabase(io, "zvectordb.db", contents, vector_index.vectors.items, vector_index.dimension);
+}
+
+fn loadOrBuildHnsw(io: anytype, allocator: std.mem.Allocator, vector_index: *const VectorIndex) !HNSW {
+    return HNSW.load(
+        io,
+        allocator,
+        hnsw_path,
+        vector_index.dimension,
+        hnsw_m,
+        hnsw_ef_construction,
+        hnsw_ef_search,
+        vector_index.vectors.items,
+    ) catch |err| switch (err) {
+        error.FileNotFound, error.StaleGraph, error.InvalidGraph, error.UnsupportedGraphVersion, error.EndOfStream => {
+            var graph = HNSW.init(allocator, vector_index.dimension, hnsw_m, hnsw_ef_construction, hnsw_ef_search);
+            errdefer graph.deinit();
+            try populateHnsw(allocator, &graph, vector_index);
+            try graph.save(io, hnsw_path, vector_index.vectors.items);
+            return graph;
+        },
+        else => return err,
+    };
+}
+
+fn rebuildHnsw(allocator: std.mem.Allocator, graph: *HNSW, vector_index: *const VectorIndex) !void {
+    graph.deinit();
+    graph.* = HNSW.init(allocator, vector_index.dimension, hnsw_m, hnsw_ef_construction, hnsw_ef_search);
+    try populateHnsw(allocator, graph, vector_index);
+}
+
+fn populateHnsw(allocator: std.mem.Allocator, graph: *HNSW, vector_index: *const VectorIndex) !void {
+    const converted = try allocator.alloc(f32, vector_index.dimension);
+    defer allocator.free(converted);
+    var random_state = std.Random.DefaultPrng.init(42);
+    for (0..vector_index.count) |id| {
+        const start = id * vector_index.dimension;
+        const stored = vector_index.vectors.items[start .. start + vector_index.dimension];
+        for (stored, 0..) |value, i| converted[i] = @floatCast(value);
+        _ = try graph.insert(converted, random_state.random());
+    }
+}
+
+fn insertHnswVector(allocator: std.mem.Allocator, graph: *HNSW, values: []const f64, id: usize) !void {
+    const converted = try allocator.alloc(f32, values.len);
+    defer allocator.free(converted);
+    for (values, 0..) |value, i| converted[i] = @floatCast(value);
+    var random_state = std.Random.DefaultPrng.init(@intCast(id + 42));
+    _ = try graph.insert(converted, random_state.random());
+}
+
+fn persistVectorData(
+    io: anytype,
+    allocator: std.mem.Allocator,
+    documents: []const Document,
+    vector_index: *const VectorIndex,
+    graph: *const HNSW,
+) !void {
+    try persistDatabase(io, allocator, documents, vector_index);
+    try graph.save(io, hnsw_path, vector_index.vectors.items);
 }
 
 fn rebuildTextIndex(
