@@ -2,6 +2,59 @@
 
 Base de données vectorielle expérimentale et moteur de recherche textuelle écrit en Zig 0.16.
 
+## Architecture actuelle
+
+Ce diagramme présente les principaux composants et leurs relations dans le fonctionnement actuel de la CLI:
+
+```mermaid
+flowchart LR
+    CLI["CLI<br/>main.zig"]
+    Engine["Engine<br/>engine.zig"]
+
+    subgraph TEXT["Recherche textuelle"]
+        Document["Document<br/>id + contenu"]
+        Tokenizer["Tokenizer"]
+        InvertedIndex["InvertedIndex<br/>termes et postings"]
+        SearchEngine["SearchEngine"]
+        BM25["BM25<br/>calcul des scores"]
+        SearchResult["SearchResult"]
+        SearchEngine -->|"tokenise la requête"| Tokenizer
+        SearchEngine -->|"lit les postings et statistiques"| InvertedIndex
+        SearchEngine -->|"score les documents"| BM25
+        SearchEngine --> SearchResult
+    end
+
+    subgraph VECTOR["Recherche vectorielle"]
+        VectorIndex["VectorIndex<br/>recherche exacte"]
+        HNSW["HNSW<br/>recherche approchée"]
+        VectorIndex -->|"vecteurs indexés"| HNSW
+    end
+
+    QueryEngine["QueryEngine<br/>planification, fusion RRF,<br/>reranking, top 10"]
+    Storage["Storage"]
+    Database[("zvectordb.db<br/>documents + vecteurs")]
+    Graph[("zvectordb.hnsw<br/>graphe HNSW")]
+
+    CLI --> Engine
+    Engine -->|"stocke"| Document
+    Engine -->|"indexe le contenu"| Tokenizer
+    Tokenizer --> InvertedIndex
+    Engine --> SearchEngine
+    Engine --> VectorIndex
+    Engine --> HNSW
+    Engine --> QueryEngine
+    SearchResult -->|"candidats BM25"| QueryEngine
+    HNSW -->|"candidats vectoriels"| QueryEngine
+    QueryEngine -->|"résultats fusionnés"| Engine
+    Engine --> Storage
+    Storage --> Database
+    HNSW --> Graph
+```
+
+`Engine` orchestre les opérations et la persistance. Le flux textuel indexe le contenu des documents via `Tokenizer` et `InvertedIndex`; `SearchEngine` applique le scorer `BM25`. Le flux vectoriel utilise `VectorIndex` pour la recherche exacte et HNSW pour la recherche approchée. Pour `query` et `hybrid`, `QueryEngine` planifie les sources, fusionne les candidats et effectue le reranking. Les documents et les vecteurs doivent actuellement avoir des identifiants alignés dans le même ordre pour être fusionnés.
+
+Le type `Document` actuellement utilisé par `Engine` est déclaré dans `engine.zig`; le fichier `src/document.zig` existe mais n'est pas encore relié à ce flux. `src/root.zig` exporte `Engine` comme module Zig. Il n'existe pas encore d'API HTTP/TypeScript: les utilisateurs passent par la CLI. Les composants WAL/snapshot et mmap restent expérimentaux et ne sont pas utilisés par l'Engine de la CLI.
+
 ## Démarrer la CLI
 
 Depuis la racine du projet:
