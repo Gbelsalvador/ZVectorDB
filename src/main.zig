@@ -1,21 +1,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const storage = @import("storage.zig");
-const InvertedIndex = @import("inverted_index.zig").InvertedIndex;
-const SearchEngine = @import("search_engine.zig").SearchEngine;
-const VectorIndex = @import("vector_index.zig").vectorindex;
-const HNSW = @import("hnsw.zig").HNSW;
-const rrf = @import("rrf.zig");
+const Engine = @import("engine.zig").Engine;
+const Document = @import("engine.zig").Document;
 const QueryEngine = @import("query_engine.zig");
+const vector = @import("vector.zig");
 const quantize = @import("quantifization.zig").quantize;
 const Vocabulary = @import("vocabulary.zig").Vocabulary;
 const TrainingDataset = @import("training_dataset.zig").TrainingDataset;
 const NegativeSampler = @import("negative_sampler.zig").NegativeSampler;
 const Word2vec = @import("word2vec.zig").Word2vec;
-const hnsw_m = 16;
-const hnsw_ef_construction = 64;
-const hnsw_ef_search = 32;
-const hnsw_path = "zvectordb.hnsw";
 
 extern "kernel32" fn SetConsoleOutputCP(code_page: u32) callconv(.winapi) i32;
 extern "kernel32" fn SetConsoleCP(code_page: u32) callconv(.winapi) i32;
@@ -45,49 +38,19 @@ const std_error_handle: u32 = 0xfffffff4;
 const enable_virtual_terminal_processing: u32 = 0x0004;
 var colors_enabled = true;
 
-const Document = struct {
-    content: []u8,
-};
-
 pub fn main(init: std.process.Init) !void {
     const original_code_pages = enableWindowsUtf8Console();
     defer restoreConsoleCodePages(original_code_pages);
     const allocator = init.gpa;
-    var index = InvertedIndex.init(allocator);
-    defer index.deinit();
-    var search_engine = SearchEngine.init(allocator, &index);
-    var vector_index = VectorIndex.init(allocator, 3);
-    defer vector_index.deinit();
-    var documents = std.ArrayList(Document).empty;
-    defer {
-        for (documents.items) |doc| allocator.free(doc.content);
-        documents.deinit(allocator);
+    var engine = Engine.init(allocator);
+    try engine.open(init.io);
+    defer engine.deinit();
+    if (engine.restored) {
+        printColored(ansi.green, "Base restaurée: {d} documents, {d} vecteurs.\n", .{
+            engine.documents.items.len,
+            engine.vector_index.count,
+        });
     }
-
-    if (storage.readDatabase(init.io, allocator, "zvectordb.db")) |loaded_database| {
-        var database = loaded_database;
-        defer database.deinit(allocator);
-        vector_index.dimension = database.dimension;
-        for (database.documents) |content| {
-            const owned = try allocator.dupe(u8, content);
-            errdefer allocator.free(owned);
-            const id = documents.items.len;
-            const tokens = try search_engine.tokenizer.tokenize(content);
-            defer search_engine.tokenizer.freeTokens(tokens);
-            try index.addDocument(id, tokens.len);
-            for (tokens) |token| try index.add(token, id);
-            try documents.append(allocator, .{ .content = owned });
-        }
-        try vector_index.vectors.appendSlice(allocator, database.vectors);
-        vector_index.count = database.vectors.len / database.dimension;
-        printColored(ansi.green, "Base restaurée: {d} documents, {d} vecteurs.\n", .{ documents.items.len, vector_index.count });
-    } else |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    }
-
-    var hnsw = try loadOrBuildHnsw(init.io, allocator, &vector_index);
-    defer hnsw.deinit();
 
     printBanner();
     var input_buffer: [4096]u8 = undefined;
@@ -106,14 +69,14 @@ pub fn main(init: std.process.Init) !void {
             printHelp();
         } else if (std.mem.eql(u8, command, "stats")) {
             printColored(ansi.cyan, "Documents: {d} | termes indexés: {d} | longueur moyenne: {d:.2} | vecteurs: {d} x {d}\n", .{
-                index.total_documents,
-                index.total_terms,
-                index.averageDocumentLength(),
-                vector_index.count,
-                vector_index.dimension,
+                engine.index.total_documents,
+                engine.index.total_terms,
+                engine.index.averageDocumentLength(),
+                engine.vector_index.count,
+                engine.vector_index.dimension,
             });
         } else if (std.mem.eql(u8, command, "index")) {
-            index.print();
+            engine.index.print();
         } else if (std.mem.startsWith(u8, command, "search-and ")) {
             var terms = std.mem.tokenizeAny(u8, command[11..], " \t");
             const left = terms.next() orelse {
@@ -124,12 +87,12 @@ pub fn main(init: std.process.Init) !void {
                 printColored(ansi.red, "Usage: search-and <mot1> <mot2>\n", .{});
                 continue;
             };
-            const matches = try index.searchAnd(left, right);
+            const matches = try engine.searchAnd(left, right);
             defer allocator.free(matches);
             if (matches.len == 0) printColored(ansi.yellow, "Aucun document ne contient les deux termes.\n", .{});
-            for (matches) |id| printColored(ansi.cyan, "[{d}] {s}\n", .{ id, documents.items[id].content });
+            for (matches) |id| printColored(ansi.cyan, "[{d}] {s}\n", .{ id, engine.documents.items[id].content });
         } else if (std.mem.startsWith(u8, command, "dimension ")) {
-            if (vector_index.count != 0) {
+            if (engine.vector_index.count != 0) {
                 printColored(ansi.yellow, "Dimension verrouillée après la première insertion.\n", .{});
                 continue;
             }
@@ -138,42 +101,30 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             };
             if (dimension == 0) continue;
-            vector_index.dimension = dimension;
-            hnsw.deinit();
-            hnsw = HNSW.init(allocator, dimension, hnsw_m, hnsw_ef_construction, hnsw_ef_search);
-            try hnsw.save(init.io, hnsw_path, vector_index.vectors.items);
+            try engine.setDimension(init.io, dimension);
             printColored(ansi.green, "Dimension vectorielle: {d}\n", .{dimension});
         } else if (std.mem.startsWith(u8, command, "vadd ")) {
             const values = parseVector(allocator, command[5..]) catch {
-                printColored(ansi.red, "Vecteur CSV invalide; dimension attendue: {d}.\n", .{vector_index.dimension});
+                printColored(ansi.red, "Vecteur CSV invalide; dimension attendue: {d}.\n", .{engine.vector_index.dimension});
                 continue;
             };
             defer allocator.free(values);
-            if (values.len != vector_index.dimension) {
-                printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ vector_index.dimension, values.len });
+            if (values.len != engine.vector_index.dimension) {
+                printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ engine.vector_index.dimension, values.len });
                 continue;
             }
-            const id = try vector_index.add(values);
-            try insertHnswVector(allocator, &hnsw, values, id);
-            try persistVectorData(init.io, allocator, documents.items, &vector_index, &hnsw);
+            const id = try engine.addVector(init.io, values);
             printColored(ansi.green, "Vecteur {d} ajouté.\n", .{id});
         } else if (std.mem.startsWith(u8, command, "vdelete ")) {
             const id = std.fmt.parseInt(usize, std.mem.trim(u8, command[8..], " \t"), 10) catch {
                 printColored(ansi.red, "Usage: vdelete <id>\n", .{});
                 continue;
             };
-            if (id >= vector_index.count) {
+            if (id >= engine.vector_index.count) {
                 printColored(ansi.yellow, "Vecteur {d} introuvable.\n", .{id});
                 continue;
             }
-            const start = id * vector_index.dimension;
-            const end = start + vector_index.dimension;
-            const remaining = vector_index.vectors.items.len - vector_index.dimension;
-            std.mem.copyForwards(f64, vector_index.vectors.items[start..remaining], vector_index.vectors.items[end..]);
-            vector_index.vectors.items.len = remaining;
-            vector_index.count -= 1;
-            try rebuildHnsw(allocator, &hnsw, &vector_index);
-            try persistVectorData(init.io, allocator, documents.items, &vector_index, &hnsw);
+            try engine.deleteVector(init.io, id);
             printColored(ansi.green, "Vecteur {d} supprimé.\n", .{id});
         } else if (std.mem.startsWith(u8, command, "vupdate ")) {
             const arguments = command[8..];
@@ -185,7 +136,7 @@ pub fn main(init: std.process.Init) !void {
                 printColored(ansi.red, "Usage: vupdate <id> <valeur1,valeur2,...>\n", .{});
                 continue;
             };
-            if (id >= vector_index.count) {
+            if (id >= engine.vector_index.count) {
                 printColored(ansi.yellow, "Vecteur {d} introuvable.\n", .{id});
                 continue;
             }
@@ -194,14 +145,11 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             };
             defer allocator.free(values);
-            if (values.len != vector_index.dimension) {
-                printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ vector_index.dimension, values.len });
+            if (values.len != engine.vector_index.dimension) {
+                printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ engine.vector_index.dimension, values.len });
                 continue;
             }
-            const start = id * vector_index.dimension;
-            @memcpy(vector_index.vectors.items[start .. start + vector_index.dimension], values);
-            try rebuildHnsw(allocator, &hnsw, &vector_index);
-            try persistVectorData(init.io, allocator, documents.items, &vector_index, &hnsw);
+            try engine.updateVector(init.io, id, values);
             printColored(ansi.green, "Vecteur {d} modifié.\n", .{id});
         } else if (std.mem.startsWith(u8, command, "vsearch ")) {
             const values = parseVector(allocator, command[8..]) catch {
@@ -209,11 +157,11 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             };
             defer allocator.free(values);
-            if (values.len != vector_index.dimension) {
-                printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ vector_index.dimension, values.len });
+            if (values.len != engine.vector_index.dimension) {
+                printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ engine.vector_index.dimension, values.len });
                 continue;
             }
-            const results = try vector_index.search(values, allocator, 5);
+            const results = try engine.searchExact(values, 5);
             defer allocator.free(results);
             if (results.len == 0) printColored(ansi.yellow, "Index vectoriel vide.\n", .{});
             for (results) |result| printColored(ansi.cyan, "[{d}] similarité cosinus {d:.5}\n", .{ result.id, result.score });
@@ -243,17 +191,15 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             }
             if (vector_values) |values| {
-                if (values.len != vector_index.dimension) {
-                    printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ vector_index.dimension, values.len });
+                if (values.len != engine.vector_index.dimension) {
+                    printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ engine.vector_index.dimension, values.len });
                     continue;
                 }
             }
 
-            const plan = QueryEngine.createPlan(
+            const plan = engine.planQuery(
                 text_query,
                 vector_values != null,
-                documents.items.len,
-                vector_index.count,
             );
             printQueryPlan(plan);
             if (!plan.use_bm25 and !plan.use_vector) {
@@ -265,33 +211,17 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             }
 
-            var bm25_results: []@import("search_result.zig").SearchResult = &.{};
-            if (plan.use_bm25) {
-                bm25_results = try search_engine.search(text_query);
-            }
-            defer if (plan.use_bm25) allocator.free(bm25_results);
-
-            var vector_results: []@import("hnsw.zig").Candidate = &.{};
-            if (plan.use_vector) {
-                const converted = try allocator.alloc(f32, vector_index.dimension);
-                defer allocator.free(converted);
-                for (vector_values.?, 0..) |value, i| converted[i] = @floatCast(value);
-                var distance_stats = @import("vector.zig").DistanceStats{};
-                vector_results = try hnsw.search(converted, allocator, plan.vector_candidates, &distance_stats);
-            }
-            defer if (plan.use_vector) allocator.free(vector_results);
-
-            const results = try QueryEngine.fuseAndRerank(allocator, bm25_results, vector_results, plan);
+            const results = try engine.executeQuery(text_query, vector_values, plan);
             defer allocator.free(results);
             if (results.len == 0) {
                 printColored(ansi.yellow, "Aucun résultat pour cette requête.\n", .{});
             } else {
                 for (results[0..@min(results.len, QueryEngine.ResultLimit)]) |result| {
-                    if (result.id < documents.items.len) {
+                    if (result.id < engine.documents.items.len) {
                         printColored(ansi.cyan, "[{d}] score {d:.5} — {s}\n", .{
                             result.id,
                             result.score,
-                            documents.items[result.id].content,
+                            engine.documents.items[result.id].content,
                         });
                     } else {
                         printColored(ansi.cyan, "[{d}] score {d:.5} — vecteur sans document associé\n", .{ result.id, result.score });
@@ -310,54 +240,36 @@ pub fn main(init: std.process.Init) !void {
                 printColored(ansi.red, "Usage: hybrid <requête texte> --vector <valeur1,valeur2,...>\n", .{});
                 continue;
             }
-            if (documents.items.len == 0 or vector_index.count == 0) {
-                printColored(ansi.yellow, "La recherche hybride exige des documents et des vecteurs.\n", .{});
-                continue;
-            }
-            if (documents.items.len != vector_index.count) {
-                printColored(ansi.yellow, "La recherche hybride exige un vecteur par document, dans le même ordre.\n", .{});
-                continue;
-            }
             const values = parseVector(allocator, vector_query_text) catch {
                 printColored(ansi.red, "Vecteur CSV invalide.\n", .{});
                 continue;
             };
             defer allocator.free(values);
-            if (values.len != vector_index.dimension) {
-                printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ vector_index.dimension, values.len });
+            if (values.len != engine.vector_index.dimension) {
+                printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ engine.vector_index.dimension, values.len });
                 continue;
             }
 
-            const text_results = try search_engine.search(text_query);
-            defer allocator.free(text_results);
-            const converted = try allocator.alloc(f32, vector_index.dimension);
-            defer allocator.free(converted);
-            for (values, 0..) |value, i| converted[i] = @floatCast(value);
-            var distance_stats = @import("vector.zig").DistanceStats{};
-            const vector_results = try hnsw.search(converted, allocator, 5, &distance_stats);
-            defer allocator.free(vector_results);
-
-            var scores = std.AutoHashMap(u64, f32).init(allocator);
-            defer scores.deinit();
-            const text_count = @min(text_results.len, 5);
-            for (text_results[0..text_count], 0..) |result, rank| {
-                try rrf.addRank(&scores, @intCast(result.document_id), rank + 1, 60);
+            const plan = engine.planQuery(text_query, true);
+            printQueryPlan(plan);
+            if (!plan.use_bm25 or !plan.use_vector) {
+                printColored(ansi.yellow, "La recherche hybride exige des documents et des vecteurs.\n", .{});
+                continue;
             }
-            for (vector_results, 0..) |result, rank| {
-                try rrf.addRank(&scores, @intCast(result.id), rank + 1, 60);
+            if (!plan.aligned_ids) {
+                printColored(ansi.yellow, "La recherche hybride exige un vecteur par document, dans le même ordre.\n", .{});
+                continue;
             }
-
-            const results = try rrf.computeRRF(allocator, &scores);
+            const results = try engine.executeQuery(text_query, values, plan);
             defer allocator.free(results);
             if (results.len == 0) {
                 printColored(ansi.yellow, "Aucun résultat hybride.\n", .{});
             } else {
-                for (results[0..@min(results.len, 5)]) |result| {
-                    const id: usize = @intCast(result.doc_id);
-                    printColored(ansi.cyan, "[{d}] score RRF {d:.5} — {s}\n", .{
-                        id,
+                for (results[0..@min(results.len, QueryEngine.ResultLimit)]) |result| {
+                    printColored(ansi.cyan, "[{d}] score {d:.5} — {s}\n", .{
+                        result.id,
                         result.score,
-                        documents.items[id].content,
+                        engine.documents.items[result.id].content,
                     });
                 }
             }
@@ -367,19 +279,16 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             };
             defer allocator.free(values);
-            if (values.len != vector_index.dimension) {
-                printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ vector_index.dimension, values.len });
+            if (values.len != engine.vector_index.dimension) {
+                printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ engine.vector_index.dimension, values.len });
                 continue;
             }
-            if (vector_index.count == 0) {
+            if (engine.vector_index.count == 0) {
                 printColored(ansi.yellow, "Index vectoriel vide.\n", .{});
                 continue;
             }
-            const converted = try allocator.alloc(f32, vector_index.dimension);
-            defer allocator.free(converted);
-            for (values, 0..) |value, i| converted[i] = @floatCast(value);
-            var distance_stats = @import("vector.zig").DistanceStats{};
-            const results = try hnsw.search(converted, allocator, 5, &distance_stats);
+            var distance_stats = vector.DistanceStats{};
+            const results = try engine.searchHnsw(values, 5, &distance_stats);
             defer allocator.free(results);
             for (results) |result| printColored(ansi.cyan, "[{d}] similarité cosinus {d:.5}\n", .{ result.id, result.score });
             printColored(ansi.yellow, "Comparaisons: {d}; graphe HNSW persistant.\n", .{distance_stats.comparisons});
@@ -407,27 +316,24 @@ pub fn main(init: std.process.Init) !void {
                 (std.fmt.parseInt(usize, raw, 10) catch 100)
             else
                 100;
-            if (documents.items.len == 0) {
+            if (engine.documents.items.len == 0) {
                 printColored(ansi.yellow, "Ajoutez d'abord des documents avec 'add'.\n", .{});
                 continue;
             }
-            try trainAndShowSimilar(allocator, documents.items, word, epochs);
+            try trainAndShowSimilar(allocator, engine.documents.items, word, epochs);
         } else if (std.mem.eql(u8, command, "list")) {
-            if (documents.items.len == 0) printColored(ansi.yellow, "Aucun document. Ajoutez-en avec: add <texte>\n", .{});
-            for (documents.items, 0..) |doc, id| printColored(ansi.cyan, "[{d}] {s}\n", .{ id, doc.content });
+            if (engine.documents.items.len == 0) printColored(ansi.yellow, "Aucun document. Ajoutez-en avec: add <texte>\n", .{});
+            for (engine.documents.items, 0..) |doc, id| printColored(ansi.cyan, "[{d}] {s}\n", .{ id, doc.content });
         } else if (std.mem.startsWith(u8, command, "delete ")) {
             const id = std.fmt.parseInt(usize, std.mem.trim(u8, command[7..], " \t"), 10) catch {
                 printColored(ansi.red, "Usage: delete <id>\n", .{});
                 continue;
             };
-            if (id >= documents.items.len) {
+            if (id >= engine.documents.items.len) {
                 printColored(ansi.yellow, "Document {d} introuvable.\n", .{id});
                 continue;
             }
-            const removed = documents.orderedRemove(id);
-            allocator.free(removed.content);
-            try rebuildTextIndex(allocator, &index, &search_engine, documents.items);
-            try persistDatabase(init.io, allocator, documents.items, &vector_index);
+            try engine.deleteDocument(init.io, id);
             printColored(ansi.green, "Document {d} supprimé.\n", .{id});
         } else if (std.mem.startsWith(u8, command, "update ")) {
             const arguments = command[7..];
@@ -440,15 +346,11 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             };
             const content = std.mem.trim(u8, arguments[separator..], " \t");
-            if (id >= documents.items.len or content.len == 0) {
+            if (id >= engine.documents.items.len or content.len == 0) {
                 printColored(ansi.yellow, "Document introuvable ou texte vide.\n", .{});
                 continue;
             }
-            const owned = try allocator.dupe(u8, content);
-            allocator.free(documents.items[id].content);
-            documents.items[id].content = owned;
-            try rebuildTextIndex(allocator, &index, &search_engine, documents.items);
-            try persistDatabase(init.io, allocator, documents.items, &vector_index);
+            try engine.updateDocument(init.io, id, content);
             printColored(ansi.green, "Document {d} modifié.\n", .{id});
         } else if (std.mem.startsWith(u8, command, "add ")) {
             const content = std.mem.trim(u8, command[4..], " \t\r");
@@ -456,23 +358,15 @@ pub fn main(init: std.process.Init) !void {
                 printColored(ansi.red, "Usage: add <texte du document>\n", .{});
                 continue;
             }
-            const owned = try allocator.dupe(u8, content);
-            errdefer allocator.free(owned);
-            const id = documents.items.len;
-            const tokens = try search_engine.tokenizer.tokenize(content);
-            defer search_engine.tokenizer.freeTokens(tokens);
-            try index.addDocument(id, tokens.len);
-            for (tokens) |token| try index.add(token, id);
-            try documents.append(allocator, .{ .content = owned });
-            try persistDatabase(init.io, allocator, documents.items, &vector_index);
-            printColored(ansi.green, "Document {d} ajouté ({d} termes).\n", .{ id, tokens.len });
+            const added = try engine.addDocument(init.io, content);
+            printColored(ansi.green, "Document {d} ajouté ({d} termes).\n", .{ added.id, added.term_count });
         } else if (std.mem.startsWith(u8, command, "search ")) {
             const query = std.mem.trim(u8, command[7..], " \t\r");
             if (query.len == 0) {
                 printColored(ansi.red, "Usage: search <requête>\n", .{});
                 continue;
             }
-            const results = try search_engine.search(query);
+            const results = try engine.searchText(query);
             defer allocator.free(results);
             if (results.len == 0) {
                 printColored(ansi.yellow, "Aucun résultat pour « {s} ».\n", .{query});
@@ -480,7 +374,7 @@ pub fn main(init: std.process.Init) !void {
                 for (results) |result| printColored(ansi.cyan, "[{d}] score {d:.4} — {s}\n", .{
                     result.document_id,
                     result.score,
-                    documents.items[result.document_id].content,
+                    engine.documents.items[result.document_id].content,
                 });
             }
         } else {
@@ -610,93 +504,6 @@ fn parseVector(allocator: std.mem.Allocator, text: []const u8) ![]f64 {
     }
     if (values.items.len == 0) return error.EmptyVector;
     return values.toOwnedSlice(allocator);
-}
-
-fn persistDatabase(
-    io: anytype,
-    allocator: std.mem.Allocator,
-    documents: []const Document,
-    vector_index: *const VectorIndex,
-) !void {
-    const contents = try allocator.alloc([]const u8, documents.len);
-    defer allocator.free(contents);
-    for (documents, 0..) |document, i| contents[i] = document.content;
-    try storage.writeDatabase(io, "zvectordb.db", contents, vector_index.vectors.items, vector_index.dimension);
-}
-
-fn loadOrBuildHnsw(io: anytype, allocator: std.mem.Allocator, vector_index: *const VectorIndex) !HNSW {
-    return HNSW.load(
-        io,
-        allocator,
-        hnsw_path,
-        vector_index.dimension,
-        hnsw_m,
-        hnsw_ef_construction,
-        hnsw_ef_search,
-        vector_index.vectors.items,
-    ) catch |err| switch (err) {
-        error.FileNotFound, error.StaleGraph, error.InvalidGraph, error.UnsupportedGraphVersion, error.EndOfStream => {
-            var graph = HNSW.init(allocator, vector_index.dimension, hnsw_m, hnsw_ef_construction, hnsw_ef_search);
-            errdefer graph.deinit();
-            try populateHnsw(allocator, &graph, vector_index);
-            try graph.save(io, hnsw_path, vector_index.vectors.items);
-            return graph;
-        },
-        else => return err,
-    };
-}
-
-fn rebuildHnsw(allocator: std.mem.Allocator, graph: *HNSW, vector_index: *const VectorIndex) !void {
-    graph.deinit();
-    graph.* = HNSW.init(allocator, vector_index.dimension, hnsw_m, hnsw_ef_construction, hnsw_ef_search);
-    try populateHnsw(allocator, graph, vector_index);
-}
-
-fn populateHnsw(allocator: std.mem.Allocator, graph: *HNSW, vector_index: *const VectorIndex) !void {
-    const converted = try allocator.alloc(f32, vector_index.dimension);
-    defer allocator.free(converted);
-    var random_state = std.Random.DefaultPrng.init(42);
-    for (0..vector_index.count) |id| {
-        const start = id * vector_index.dimension;
-        const stored = vector_index.vectors.items[start .. start + vector_index.dimension];
-        for (stored, 0..) |value, i| converted[i] = @floatCast(value);
-        _ = try graph.insert(converted, random_state.random());
-    }
-}
-
-fn insertHnswVector(allocator: std.mem.Allocator, graph: *HNSW, values: []const f64, id: usize) !void {
-    const converted = try allocator.alloc(f32, values.len);
-    defer allocator.free(converted);
-    for (values, 0..) |value, i| converted[i] = @floatCast(value);
-    var random_state = std.Random.DefaultPrng.init(@intCast(id + 42));
-    _ = try graph.insert(converted, random_state.random());
-}
-
-fn persistVectorData(
-    io: anytype,
-    allocator: std.mem.Allocator,
-    documents: []const Document,
-    vector_index: *const VectorIndex,
-    graph: *const HNSW,
-) !void {
-    try persistDatabase(io, allocator, documents, vector_index);
-    try graph.save(io, hnsw_path, vector_index.vectors.items);
-}
-
-fn rebuildTextIndex(
-    allocator: std.mem.Allocator,
-    index: *InvertedIndex,
-    search_engine: *SearchEngine,
-    documents: []const Document,
-) !void {
-    index.deinit();
-    index.* = InvertedIndex.init(allocator);
-    for (documents, 0..) |document, id| {
-        const tokens = try search_engine.tokenizer.tokenize(document.content);
-        defer search_engine.tokenizer.freeTokens(tokens);
-        try index.addDocument(id, tokens.len);
-        for (tokens) |token| try index.add(token, id);
-    }
 }
 
 fn trainAndShowSimilar(
