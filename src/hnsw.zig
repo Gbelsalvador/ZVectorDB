@@ -645,12 +645,13 @@ pub const HNSW = struct {
         while (level > 0) : (level -= 1) {
             current = self.greedySearch(query, current, level, stats);
         }
+        const search_ef = @max(self.ef_search, top_k);
         const candidates =
             try self.searchLayer(
                 query,
                 current,
                 0,
-                self.ef_search,
+                search_ef,
                 allocator,
                 stats,
             );

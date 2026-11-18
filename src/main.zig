@@ -6,6 +6,7 @@ const SearchEngine = @import("search_engine.zig").SearchEngine;
 const VectorIndex = @import("vector_index.zig").vectorindex;
 const HNSW = @import("hnsw.zig").HNSW;
 const rrf = @import("rrf.zig");
+const QueryEngine = @import("query_engine.zig");
 const quantize = @import("quantifization.zig").quantize;
 const Vocabulary = @import("vocabulary.zig").Vocabulary;
 const TrainingDataset = @import("training_dataset.zig").TrainingDataset;
@@ -216,6 +217,87 @@ pub fn main(init: std.process.Init) !void {
             defer allocator.free(results);
             if (results.len == 0) printColored(ansi.yellow, "Index vectoriel vide.\n", .{});
             for (results) |result| printColored(ansi.cyan, "[{d}] similarité cosinus {d:.5}\n", .{ result.id, result.score });
+        } else if (std.mem.startsWith(u8, command, "query ")) {
+            const arguments = command[6..];
+            const vector_marker = std.mem.indexOf(u8, arguments, "--vector");
+            const text_query = if (vector_marker) |marker|
+                std.mem.trim(u8, arguments[0..marker], " \t")
+            else
+                std.mem.trim(u8, arguments, " \t");
+            var vector_values: ?[]f64 = null;
+            defer {
+                if (vector_values) |values| allocator.free(values);
+            }
+            if (vector_marker) |marker| {
+                const vector_query_text = std.mem.trim(u8, arguments[marker + "--vector".len ..], " \t");
+                if (vector_query_text.len == 0) {
+                    printColored(ansi.red, "Usage: query <texte> [--vector <csv>]\n", .{});
+                    continue;
+                }
+                vector_values = parseVector(allocator, vector_query_text) catch {
+                    printColored(ansi.red, "Vecteur CSV invalide.\n", .{});
+                    continue;
+                };
+            } else if (text_query.len == 0) {
+                printColored(ansi.red, "Usage: query <texte> [--vector <csv>]\n", .{});
+                continue;
+            }
+            if (vector_values) |values| {
+                if (values.len != vector_index.dimension) {
+                    printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ vector_index.dimension, values.len });
+                    continue;
+                }
+            }
+
+            const plan = QueryEngine.createPlan(
+                text_query,
+                vector_values != null,
+                documents.items.len,
+                vector_index.count,
+            );
+            printQueryPlan(plan);
+            if (!plan.use_bm25 and !plan.use_vector) {
+                printColored(ansi.yellow, "Aucune source de recherche disponible pour cette requête.\n", .{});
+                continue;
+            }
+            if (!plan.aligned_ids) {
+                printColored(ansi.yellow, "Exécution annulée: le nombre de documents et de vecteurs doit correspondre pour fusionner leurs identifiants.\n", .{});
+                continue;
+            }
+
+            var bm25_results: []@import("search_result.zig").SearchResult = &.{};
+            if (plan.use_bm25) {
+                bm25_results = try search_engine.search(text_query);
+            }
+            defer if (plan.use_bm25) allocator.free(bm25_results);
+
+            var vector_results: []@import("hnsw.zig").Candidate = &.{};
+            if (plan.use_vector) {
+                const converted = try allocator.alloc(f32, vector_index.dimension);
+                defer allocator.free(converted);
+                for (vector_values.?, 0..) |value, i| converted[i] = @floatCast(value);
+                var distance_stats = @import("vector.zig").DistanceStats{};
+                vector_results = try hnsw.search(converted, allocator, plan.vector_candidates, &distance_stats);
+            }
+            defer if (plan.use_vector) allocator.free(vector_results);
+
+            const results = try QueryEngine.fuseAndRerank(allocator, bm25_results, vector_results, plan);
+            defer allocator.free(results);
+            if (results.len == 0) {
+                printColored(ansi.yellow, "Aucun résultat pour cette requête.\n", .{});
+            } else {
+                for (results[0..@min(results.len, QueryEngine.ResultLimit)]) |result| {
+                    if (result.id < documents.items.len) {
+                        printColored(ansi.cyan, "[{d}] score {d:.5} — {s}\n", .{
+                            result.id,
+                            result.score,
+                            documents.items[result.id].content,
+                        });
+                    } else {
+                        printColored(ansi.cyan, "[{d}] score {d:.5} — vecteur sans document associé\n", .{ result.id, result.score });
+                    }
+                }
+            }
         } else if (std.mem.startsWith(u8, command, "hybrid ")) {
             const arguments = command[7..];
             const vector_marker = std.mem.indexOf(u8, arguments, "--vector") orelse {
@@ -485,12 +567,31 @@ fn printHelp() void {
         \\  vsearch <csv>   Recherche exacte top 5 par cosinus
         \\  hsearch <csv>   Recherche top 5 dans le graphe HNSW persistant
         \\  hybrid <texte> --vector <csv> Fusion BM25/HNSW, un vecteur par document
+        \\  query <texte> [--vector <csv>] Planifier puis exécuter (top 10)
         \\  quantize <csv>  Quantifier un vecteur en INT8
         \\  train <mot> [n] Entraîner Word2Vec sur les documents et voir les voisins
         \\  help            Afficher cette aide
         \\  quit / exit     Quitter
         \\
     , .{});
+}
+
+fn printQueryPlan(plan: QueryEngine.Plan) void {
+    printColored(ansi.yellow, "Plan du query engine:\n", .{});
+    printColored(ansi.cyan, "  1. Filtres: aucun (pas de métadonnées indexées).\n", .{});
+    printColored(ansi.cyan, "  2. Candidats BM25: {d} (maximum 50).\n", .{plan.bm25_candidates});
+    printColored(ansi.cyan, "  3. Candidats HNSW: {d} (maximum 50).\n", .{plan.vector_candidates});
+    printColored(ansi.cyan, "  4. Recherche vectorielle: {s}.\n", .{if (plan.use_vector) "oui" else "non"});
+    printColored(ansi.cyan, "  5. Recherche BM25: {s}.\n", .{if (plan.use_bm25) "oui" else "non"});
+    if (plan.usesBothSources() and plan.aligned_ids) {
+        printColored(ansi.cyan, "  6. Fusion: RRF (k=60), puis reranking.\n", .{});
+    } else if (plan.usesBothSources()) {
+        printColored(ansi.cyan, "  6. Fusion: impossible tant que les identifiants document/vecteur ne sont pas alignés.\n", .{});
+    } else {
+        printColored(ansi.cyan, "  6. Fusion: aucune, une seule source active.\n", .{});
+    }
+    printColored(ansi.cyan, "  7. Reranking: scores min-max normalisés; poids 50/50 si les deux sources ont des résultats.\n", .{});
+    printColored(ansi.cyan, "  8. Résultats: top {d}.\n", .{QueryEngine.ResultLimit});
 }
 
 fn printColored(color: []const u8, comptime format: []const u8, args: anytype) void {

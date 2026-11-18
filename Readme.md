@@ -35,6 +35,7 @@ zvectordb> vupdate 0 1,0.1,0
 zvectordb> vsearch 1,0,0
 zvectordb> hsearch 1,0,0
 zvectordb> hybrid langage programmation --vector 1,0,0
+zvectordb> query langage programmation --vector 1,0,0
 zvectordb> vdelete 1
 zvectordb> quantize 0.25,-0.5,1
 zvectordb> train langage 100
@@ -43,6 +44,8 @@ zvectordb> train langage 100
 `vsearch` fait une recherche exacte par similarité cosinus. `hsearch` utilise un graphe HNSW conservé en mémoire pendant la session et enregistré dans `zvectordb.hnsw`; il est restauré au prochain lancement et mis à jour avec les opérations vectorielles. `quantize` affiche les valeurs INT8 et le facteur d'échelle.
 
 `hybrid <requête texte> --vector <csv>` fusionne les cinq premiers résultats BM25 et HNSW avec Reciprocal Rank Fusion (RRF). Il faut un vecteur par document, dans le même ordre, afin que les identifiants correspondent.
+
+`query <texte> [--vector <csv>]` affiche son plan de recherche (filtres, sources, nombre de candidats, fusion, reranking et limite), puis l'exécute. Il prend jusqu'à 50 candidats par source, fusionne les rangs par RRF, rerank les candidats avec les scores BM25 et cosinus normalisés (poids 50/50 si les deux sources ont des résultats), puis retourne jusqu'à 10 résultats. Sans vecteur de requête, il utilise BM25 seul; sans texte, HNSW seul. Les filtres restent désactivés tant que les documents ne portent pas de métadonnées indexées.
 
 `vupdate <id> <csv>` modifie un vecteur et `vdelete <id>` le supprime. Les vecteurs suivants sont renumérotés après suppression.
 
