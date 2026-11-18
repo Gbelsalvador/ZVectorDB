@@ -12,7 +12,7 @@ zig build run
 
 La CLI utilise des couleurs ANSI pour distinguer l'invite, les résultats, les messages d'erreur et les confirmations. Dans Windows Terminal, le mode ANSI est activé automatiquement.
 
-La CLI interactive indexe les documents et les classe avec BM25. Les documents et les vecteurs sont enregistrés automatiquement dans `zvectordb.db` après chaque insertion, puis restaurés au prochain lancement:
+La CLI délègue l'orchestration à `Engine`, qui réunit documents/BM25, vecteurs/HNSW et query engine tout en conservant `zvectordb.db` et `zvectordb.hnsw`. Le `WalEngine` de bas niveau reste expérimental et n'est pas activé par la CLI. Les documents et les vecteurs sont enregistrés automatiquement après chaque insertion, puis restaurés au prochain lancement:
 
 ```text
 zvectordb> add Zig est un langage de programmation système
@@ -43,7 +43,7 @@ zvectordb> train langage 100
 
 `vsearch` fait une recherche exacte par similarité cosinus. `hsearch` utilise un graphe HNSW conservé en mémoire pendant la session et enregistré dans `zvectordb.hnsw`; il est restauré au prochain lancement et mis à jour avec les opérations vectorielles. `quantize` affiche les valeurs INT8 et le facteur d'échelle.
 
-`hybrid <requête texte> --vector <csv>` fusionne les cinq premiers résultats BM25 et HNSW avec Reciprocal Rank Fusion (RRF). Il faut un vecteur par document, dans le même ordre, afin que les identifiants correspondent.
+`hybrid <requête texte> --vector <csv>` lance le query engine avec BM25 et HNSW. Il faut un vecteur par document, dans le même ordre, afin que les identifiants correspondent.
 
 `query <texte> [--vector <csv>]` affiche son plan de recherche (filtres, sources, nombre de candidats, fusion, reranking et limite), puis l'exécute. Il prend jusqu'à 50 candidats par source, fusionne les rangs par RRF, rerank les candidats avec les scores BM25 et cosinus normalisés (poids 50/50 si les deux sources ont des résultats), puis retourne jusqu'à 10 résultats. Sans vecteur de requête, il utilise BM25 seul; sans texte, HNSW seul. Les filtres restent désactivés tant que les documents ne portent pas de métadonnées indexées.
 
