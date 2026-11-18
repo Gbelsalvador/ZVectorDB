@@ -5,6 +5,7 @@ const InvertedIndex = @import("inverted_index.zig").InvertedIndex;
 const SearchEngine = @import("search_engine.zig").SearchEngine;
 const VectorIndex = @import("vector_index.zig").vectorindex;
 const HNSW = @import("hnsw.zig").HNSW;
+const rrf = @import("rrf.zig");
 const quantize = @import("quantifization.zig").quantize;
 const Vocabulary = @import("vocabulary.zig").Vocabulary;
 const TrainingDataset = @import("training_dataset.zig").TrainingDataset;
@@ -215,6 +216,69 @@ pub fn main(init: std.process.Init) !void {
             defer allocator.free(results);
             if (results.len == 0) printColored(ansi.yellow, "Index vectoriel vide.\n", .{});
             for (results) |result| printColored(ansi.cyan, "[{d}] similarité cosinus {d:.5}\n", .{ result.id, result.score });
+        } else if (std.mem.startsWith(u8, command, "hybrid ")) {
+            const arguments = command[7..];
+            const vector_marker = std.mem.indexOf(u8, arguments, "--vector") orelse {
+                printColored(ansi.red, "Usage: hybrid <requête texte> --vector <valeur1,valeur2,...>\n", .{});
+                continue;
+            };
+            const text_query = std.mem.trim(u8, arguments[0..vector_marker], " \t");
+            const vector_query_text = std.mem.trim(u8, arguments[vector_marker + "--vector".len ..], " \t");
+            if (text_query.len == 0 or vector_query_text.len == 0) {
+                printColored(ansi.red, "Usage: hybrid <requête texte> --vector <valeur1,valeur2,...>\n", .{});
+                continue;
+            }
+            if (documents.items.len == 0 or vector_index.count == 0) {
+                printColored(ansi.yellow, "La recherche hybride exige des documents et des vecteurs.\n", .{});
+                continue;
+            }
+            if (documents.items.len != vector_index.count) {
+                printColored(ansi.yellow, "La recherche hybride exige un vecteur par document, dans le même ordre.\n", .{});
+                continue;
+            }
+            const values = parseVector(allocator, vector_query_text) catch {
+                printColored(ansi.red, "Vecteur CSV invalide.\n", .{});
+                continue;
+            };
+            defer allocator.free(values);
+            if (values.len != vector_index.dimension) {
+                printColored(ansi.red, "Dimension incorrecte: attendu {d}, reçu {d}.\n", .{ vector_index.dimension, values.len });
+                continue;
+            }
+
+            const text_results = try search_engine.search(text_query);
+            defer allocator.free(text_results);
+            const converted = try allocator.alloc(f32, vector_index.dimension);
+            defer allocator.free(converted);
+            for (values, 0..) |value, i| converted[i] = @floatCast(value);
+            var distance_stats = @import("vector.zig").DistanceStats{};
+            const vector_results = try hnsw.search(converted, allocator, 5, &distance_stats);
+            defer allocator.free(vector_results);
+
+            var scores = std.AutoHashMap(u64, f32).init(allocator);
+            defer scores.deinit();
+            const text_count = @min(text_results.len, 5);
+            for (text_results[0..text_count], 0..) |result, rank| {
+                try rrf.addRank(&scores, @intCast(result.document_id), rank + 1, 60);
+            }
+            for (vector_results, 0..) |result, rank| {
+                try rrf.addRank(&scores, @intCast(result.id), rank + 1, 60);
+            }
+
+            const results = try rrf.computeRRF(allocator, &scores);
+            defer allocator.free(results);
+            if (results.len == 0) {
+                printColored(ansi.yellow, "Aucun résultat hybride.\n", .{});
+            } else {
+                for (results[0..@min(results.len, 5)]) |result| {
+                    const id: usize = @intCast(result.doc_id);
+                    printColored(ansi.cyan, "[{d}] score RRF {d:.5} — {s}\n", .{
+                        id,
+                        result.score,
+                        documents.items[id].content,
+                    });
+                }
+            }
         } else if (std.mem.startsWith(u8, command, "hsearch ")) {
             const values = parseVector(allocator, command[8..]) catch {
                 printColored(ansi.red, "Usage: hsearch <valeur1,valeur2,...>\n", .{});
@@ -420,6 +484,7 @@ fn printHelp() void {
         \\  vdelete <id>    Supprimer un vecteur
         \\  vsearch <csv>   Recherche exacte top 5 par cosinus
         \\  hsearch <csv>   Recherche top 5 dans le graphe HNSW persistant
+        \\  hybrid <texte> --vector <csv> Fusion BM25/HNSW, un vecteur par document
         \\  quantize <csv>  Quantifier un vecteur en INT8
         \\  train <mot> [n] Entraîner Word2Vec sur les documents et voir les voisins
         \\  help            Afficher cette aide
