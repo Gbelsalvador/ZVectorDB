@@ -9,6 +9,7 @@ const Vocabulary = @import("vocabulary.zig").Vocabulary;
 const TrainingDataset = @import("training_dataset.zig").TrainingDataset;
 const NegativeSampler = @import("negative_sampler.zig").NegativeSampler;
 const Word2vec = @import("word2vec.zig").Word2vec;
+const ApiV1 = @import("api_v1/root.zig");
 
 extern "kernel32" fn SetConsoleOutputCP(code_page: u32) callconv(.winapi) i32;
 extern "kernel32" fn SetConsoleCP(code_page: u32) callconv(.winapi) i32;
@@ -42,6 +43,14 @@ pub fn main(init: std.process.Init) !void {
     const original_code_pages = enableWindowsUtf8Console();
     defer restoreConsoleCodePages(original_code_pages);
     const allocator = init.gpa;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len > 1 and std.mem.eql(u8, args[1], "serve")) {
+        const port: u16 = if (args.len > 2) try std.fmt.parseInt(u16, args[2], 10) else 8080;
+        var manager = try ApiV1.CollectionManager.init(allocator, init.io);
+        defer manager.deinit();
+        try ApiV1.HttpServer.serve(init.io, allocator, &manager, port);
+        return;
+    }
     var engine = Engine.init(allocator);
     try engine.open(init.io);
     defer engine.deinit();

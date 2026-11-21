@@ -5,4 +5,7 @@ test/
 *.exe
 *.pdb
 *.db
+*.hnsw
+zvectordb.collections
+zvectordb.collections.tmp
 release.md

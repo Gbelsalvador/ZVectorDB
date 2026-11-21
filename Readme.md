@@ -53,7 +53,7 @@ flowchart LR
 
 `Engine` orchestre les opérations et la persistance. Le flux textuel indexe le contenu des documents via `Tokenizer` et `InvertedIndex`; `SearchEngine` applique le scorer `BM25`. Le flux vectoriel utilise `VectorIndex` pour la recherche exacte et HNSW pour la recherche approchée. Pour `query` et `hybrid`, `QueryEngine` planifie les sources, fusionne les candidats et effectue le reranking. Les documents et les vecteurs doivent actuellement avoir des identifiants alignés dans le même ordre pour être fusionnés.
 
-Le type `Document` actuellement utilisé par `Engine` est déclaré dans `engine.zig`; le fichier `src/document.zig` existe mais n'est pas encore relié à ce flux. `src/root.zig` exporte `Engine` comme module Zig. Il n'existe pas encore d'API HTTP/TypeScript: les utilisateurs passent par la CLI. Les composants WAL/snapshot et mmap restent expérimentaux et ne sont pas utilisés par l'Engine de la CLI.
+Le type `Document` actuellement utilisé par `Engine` est déclaré dans `engine.zig`; le fichier `src/document.zig` existe mais n'est pas encore relié à ce flux. `src/root.zig` exporte `Engine` comme module Zig. L'API HTTP v1 expose maintenant les opérations de base via des collections persistantes; les utilisateurs peuvent aussi continuer à passer par la CLI. Les composants WAL/snapshot et mmap restent expérimentaux et ne sont pas utilisés par l'Engine de la CLI.
 
 ## Démarrer la CLI
 
@@ -103,3 +103,28 @@ zvectordb> train langage 100
 `vupdate <id> <csv>` modifie un vecteur et `vdelete <id>` le supprime. Les vecteurs suivants sont renumérotés après suppression.
 
 `train <mot> [époques]` entraîne un modèle Word2Vec sur les documents et affiche les cinq voisins du mot. Le modèle Word2Vec reste temporaire; les documents et les vecteurs de la CLI sont conservés dans `zvectordb.db`, et le graphe HNSW dans `zvectordb.hnsw`, dans le répertoire courant. Le stockage WAL/snapshot et mmap existent comme modules expérimentaux séparés.
+
+## API HTTP v1
+
+Le serveur HTTP expose le moteur sur `127.0.0.1` (port `8080` par défaut). Lancez-le avec:
+
+```sh
+zig build run -- serve [port]
+```
+
+Routes disponibles:
+
+| Méthode | Route | Fonction |
+|---|---|---|
+| `GET` | `/api/v1/collections` | Lister les collections |
+| `POST` | `/api/v1/collections` | Créer avec `{"name":"articles"}` |
+| `GET` | `/api/v1/collections/{name}` | Lire une collection |
+| `DELETE` | `/api/v1/collections/{name}` | Supprimer une collection et ses fichiers |
+| `GET` | `/api/v1/collections/{name}/documents` | Lister les documents |
+| `POST` | `/api/v1/collections/{name}/documents` | Ajouter `{"content":"..."}` |
+| `GET` | `/api/v1/collections/{name}/documents/{id}` | Lire un document |
+| `PUT` | `/api/v1/collections/{name}/documents/{id}` | Remplacer son contenu |
+| `DELETE` | `/api/v1/collections/{name}/documents/{id}` | Supprimer le document |
+| `POST` | `/api/v1/collections/{name}/search` | Recherche BM25 avec `{"query":"..."}` |
+
+Les collections sont enregistrées dans `zvectordb.collections`. La collection `default` continue d’utiliser `zvectordb.db` et `zvectordb.hnsw`; les autres collections ont leurs propres fichiers `zvectordb.collection.{name}.db` et `.hnsw`. L’API écoute uniquement sur l’interface locale et accepte les requêtes HTTP/1.1 avec un corps JSON limité à 1 Mio.

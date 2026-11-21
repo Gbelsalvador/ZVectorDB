@@ -3,6 +3,7 @@ const std = @import("std");
 const Io = std.Io;
 
 pub const Engine = @import("engine.zig").Engine;
+pub const ApiV1 = @import("api_v1/root.zig");
 
 /// This is a documentation comment to explain the `printAnotherMessage` function below.
 ///
