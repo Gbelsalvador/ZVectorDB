@@ -245,10 +245,35 @@ pub const Engine = struct {
 
     pub fn deleteDocument(self: *Engine, io: anytype, id: usize) !void {
         if (id >= self.documents.items.len) return error.DocumentNotFound;
+
+        // Document and vector IDs share the same positional namespace for
+        // hybrid queries. Removing a document shifts every later document ID,
+        // so remove the vector at the same position as well when one exists.
+        // If there is no vector at this position, the remaining vectors still
+        // form a prefix and their IDs remain aligned with the remaining docs.
+        const removed_vector = id < self.vector_index.count;
+        if (removed_vector) {
+            const start = id * self.vector_index.dimension;
+            const end = start + self.vector_index.dimension;
+            const remaining = self.vector_index.vectors.items.len - self.vector_index.dimension;
+            std.mem.copyForwards(
+                f64,
+                self.vector_index.vectors.items[start..remaining],
+                self.vector_index.vectors.items[end..],
+            );
+            self.vector_index.vectors.items.len = remaining;
+            self.vector_index.count -= 1;
+            try self.rebuildHnsw();
+        }
+
         const removed = self.documents.orderedRemove(id);
         self.allocator.free(removed.content);
         try self.rebuildTextIndex();
-        try self.persistDatabase(io);
+        if (removed_vector) {
+            try self.persistVectorData(io);
+        } else {
+            try self.persistDatabase(io);
+        }
     }
 
     pub fn setDimension(self: *Engine, io: anytype, dimension: usize) !void {
