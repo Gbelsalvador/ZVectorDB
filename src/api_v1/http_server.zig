@@ -1,22 +1,22 @@
 const std = @import("std");
-const Engine = @import("../engine.zig").Engine;
+const Manager = @import("collection_manager.zig").Manager;
 const router = @import("router.zig");
 
 const max_header_bytes = 16 * 1024;
 const max_body_bytes = 1024 * 1024;
 
-pub fn serve(io: std.Io, allocator: std.mem.Allocator, engine: *Engine, port: u16) !void {
+pub fn serve(io: std.Io, allocator: std.mem.Allocator, manager: *Manager, port: u16) !void {
     const address = std.Io.net.IpAddress.parse("127.0.0.1", port) catch return error.InvalidAddress;
     var server = try address.listen(io, .{ .reuse_address = true });
     defer server.deinit(io);
     std.debug.print("API v1 en écoute sur http://127.0.0.1:{d}/api/v1\n", .{port});
     while (true) {
         const stream = try server.accept(io);
-        handleConnection(io, allocator, engine, stream) catch |err| std.log.warn("requête HTTP ignorée: {s}", .{@errorName(err)});
+        handleConnection(io, allocator, manager, stream) catch |err| std.log.warn("HTTP request ignored: {s}", .{@errorName(err)});
     }
 }
 
-fn handleConnection(io: std.Io, allocator: std.mem.Allocator, engine: *Engine, stream: std.Io.net.Stream) !void {
+fn handleConnection(io: std.Io, allocator: std.mem.Allocator, manager: *Manager, stream: std.Io.net.Stream) !void {
     defer stream.close(io);
     var read_buffer: [4096]u8 = undefined;
     var reader = stream.reader(io, &read_buffer);
@@ -52,7 +52,7 @@ fn handleConnection(io: std.Io, allocator: std.mem.Allocator, engine: *Engine, s
     const body = try allocator.alloc(u8, content_length);
     defer allocator.free(body);
     if (content_length != 0) try reader.interface.readSliceAll(body);
-    const result = try router.route(allocator, engine, io, .{ .method = method, .path = path, .body = body });
+    const result = try router.route(allocator, manager, io, .{ .method = method, .path = path, .body = body });
     defer allocator.free(result.body);
     try writeResponse(io, allocator, stream, result);
 }

@@ -171,12 +171,14 @@ pub const Engine = struct {
     hnsw: HNSW,
     documents: std.ArrayList(Document),
     restored: bool = false,
+    database_file: []const u8 = "zvectordb.db",
+    hnsw_file: []const u8 = "zvectordb.hnsw",
+    owned_database_file: ?[]u8 = null,
+    owned_hnsw_file: ?[]u8 = null,
 
     const hnsw_m = 16;
     const hnsw_ef_construction = 64;
     const hnsw_ef_search = 32;
-    const database_path = "zvectordb.db";
-    const hnsw_path = "zvectordb.hnsw";
 
     pub fn init(allocator: std.mem.Allocator) Engine {
         return .{
@@ -190,7 +192,7 @@ pub const Engine = struct {
 
     pub fn open(self: *Engine, io: anytype) !void {
         errdefer self.deinit();
-        if (storage.readDatabase(io, self.allocator, database_path)) |loaded_database| {
+        if (storage.readDatabase(io, self.allocator, self.database_file)) |loaded_database| {
             var database = loaded_database;
             defer database.deinit(self.allocator);
             self.restored = true;
@@ -209,7 +211,7 @@ pub const Engine = struct {
             else => return err,
         }
 
-        const loaded_hnsw = try loadOrBuildHnsw(io, self.allocator, &self.vector_index);
+        const loaded_hnsw = try loadOrBuildHnsw(io, self.allocator, &self.vector_index, self.hnsw_file);
         self.hnsw.deinit();
         self.hnsw = loaded_hnsw;
     }
@@ -220,6 +222,20 @@ pub const Engine = struct {
         self.index.deinit();
         for (self.documents.items) |document| self.allocator.free(document.content);
         self.documents.deinit(self.allocator);
+        if (self.owned_database_file) |path| self.allocator.free(path);
+        if (self.owned_hnsw_file) |path| self.allocator.free(path);
+    }
+
+    pub fn setStoragePaths(self: *Engine, database_file: []const u8, hnsw_file: []const u8) !void {
+        const owned_database = try self.allocator.dupe(u8, database_file);
+        errdefer self.allocator.free(owned_database);
+        const owned_hnsw = try self.allocator.dupe(u8, hnsw_file);
+        if (self.owned_database_file) |path| self.allocator.free(path);
+        if (self.owned_hnsw_file) |path| self.allocator.free(path);
+        self.owned_database_file = owned_database;
+        self.owned_hnsw_file = owned_hnsw;
+        self.database_file = owned_database;
+        self.hnsw_file = owned_hnsw;
     }
 
     pub fn addDocument(self: *Engine, io: anytype, content: []const u8) !AddDocumentResult {
@@ -282,7 +298,7 @@ pub const Engine = struct {
         self.vector_index.dimension = dimension;
         self.hnsw.deinit();
         self.hnsw = HNSW.init(self.allocator, dimension, hnsw_m, hnsw_ef_construction, hnsw_ef_search);
-        try self.hnsw.save(io, hnsw_path, self.vector_index.vectors.items);
+        try self.hnsw.save(io, self.hnsw_file, self.vector_index.vectors.items);
     }
 
     pub fn addVector(self: *Engine, io: anytype, values: []const f64) !usize {
@@ -388,12 +404,12 @@ pub const Engine = struct {
         const contents = try self.allocator.alloc([]const u8, self.documents.items.len);
         defer self.allocator.free(contents);
         for (self.documents.items, 0..) |document, i| contents[i] = document.content;
-        try storage.writeDatabase(io, database_path, contents, self.vector_index.vectors.items, self.vector_index.dimension);
+        try storage.writeDatabase(io, self.database_file, contents, self.vector_index.vectors.items, self.vector_index.dimension);
     }
 
     fn persistVectorData(self: *Engine, io: anytype) !void {
         try self.persistDatabase(io);
-        try self.hnsw.save(io, hnsw_path, self.vector_index.vectors.items);
+        try self.hnsw.save(io, self.hnsw_file, self.vector_index.vectors.items);
     }
 
     fn rebuildHnsw(self: *Engine) !void {
@@ -423,11 +439,11 @@ pub const Engine = struct {
     }
 };
 
-fn loadOrBuildHnsw(io: anytype, allocator: std.mem.Allocator, vector_index: *const VectorIndex) !HNSW {
+fn loadOrBuildHnsw(io: anytype, allocator: std.mem.Allocator, vector_index: *const VectorIndex, path: []const u8) !HNSW {
     return HNSW.load(
         io,
         allocator,
-        Engine.hnsw_path,
+        path,
         vector_index.dimension,
         Engine.hnsw_m,
         Engine.hnsw_ef_construction,
@@ -446,7 +462,7 @@ fn loadOrBuildHnsw(io: anytype, allocator: std.mem.Allocator, vector_index: *con
                 for (stored, 0..) |value, i| converted[i] = @floatCast(value);
                 _ = try graph.insert(converted, random_state.random());
             }
-            try graph.save(io, Engine.hnsw_path, vector_index.vectors.items);
+            try graph.save(io, path, vector_index.vectors.items);
             return graph;
         },
         else => return err,

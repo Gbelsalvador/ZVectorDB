@@ -43,15 +43,17 @@ pub fn main(init: std.process.Init) !void {
     const original_code_pages = enableWindowsUtf8Console();
     defer restoreConsoleCodePages(original_code_pages);
     const allocator = init.gpa;
-    var engine = Engine.init(allocator);
-    try engine.open(init.io);
-    defer engine.deinit();
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len > 1 and std.mem.eql(u8, args[1], "serve")) {
         const port: u16 = if (args.len > 2) try std.fmt.parseInt(u16, args[2], 10) else 8080;
-        try ApiV1.HttpServer.serve(init.io, allocator, &engine, port);
+        var manager = try ApiV1.CollectionManager.init(allocator, init.io);
+        defer manager.deinit();
+        try ApiV1.HttpServer.serve(init.io, allocator, &manager, port);
         return;
     }
+    var engine = Engine.init(allocator);
+    try engine.open(init.io);
+    defer engine.deinit();
     if (engine.restored) {
         printColored(ansi.green, "Base restaurée: {d} documents, {d} vecteurs.\n", .{
             engine.documents.items.len,

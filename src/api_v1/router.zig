@@ -1,5 +1,5 @@
 const std = @import("std");
-const Engine = @import("../engine.zig").Engine;
+const Manager = @import("collection_manager.zig").Manager;
 const collections = @import("collections.zig");
 const documents = @import("documents.zig");
 const search = @import("search.zig");
@@ -8,10 +8,21 @@ const json = @import("json.zig");
 pub const Request = struct { method: []const u8, path: []const u8, body: []const u8 = "" };
 pub const Response = struct { status: u16, body: []u8 };
 
-pub fn route(allocator: std.mem.Allocator, engine: *Engine, io: std.Io, request: Request) !Response {
+pub fn route(allocator: std.mem.Allocator, manager: *Manager, io: std.Io, request: Request) !Response {
     if (std.mem.eql(u8, request.path, "/api/v1/collections")) {
-        if (!std.mem.eql(u8, request.method, "GET")) return response(allocator, 405, "{\"error\":\"method_not_allowed\"}");
-        return .{ .status = 200, .body = try collections.list(allocator) };
+        if (std.mem.eql(u8, request.method, "GET")) return .{ .status = 200, .body = try collections.list(manager) };
+        if (std.mem.eql(u8, request.method, "POST")) {
+            var parsed = json.parse(allocator, request.body) catch return response(allocator, 400, "{\"error\":\"invalid_json\"}");
+            defer parsed.deinit();
+            const name = json.stringField(parsed.value, "name") orelse return response(allocator, 400, "{\"error\":\"name_required\"}");
+            collections.create(manager, name) catch |err| switch (err) {
+                error.InvalidCollectionName => return response(allocator, 400, "{\"error\":\"invalid_collection_name\"}"),
+                error.CollectionAlreadyExists => return response(allocator, 409, "{\"error\":\"collection_exists\"}"),
+                else => return err,
+            };
+            return .{ .status = 201, .body = try collections.get(allocator, manager, name) orelse unreachable };
+        }
+        return response(allocator, 405, "{\"error\":\"method_not_allowed\"}");
     }
 
     const prefix = "/api/v1/collections/";
@@ -19,11 +30,14 @@ pub fn route(allocator: std.mem.Allocator, engine: *Engine, io: std.Io, request:
     const tail = request.path[prefix.len..];
     const slash = std.mem.indexOfScalar(u8, tail, '/') orelse tail.len;
     const collection_name = tail[0..slash];
-    const collection = try collections.get(allocator, collection_name) orelse return response(allocator, 404, "{\"error\":\"collection_not_found\"}");
-    allocator.free(collection);
+    const engine = manager.get(collection_name) orelse return response(allocator, 404, "{\"error\":\"collection_not_found\"}");
     if (slash == tail.len) {
-        if (!std.mem.eql(u8, request.method, "GET")) return response(allocator, 405, "{\"error\":\"method_not_allowed\"}");
-        return .{ .status = 200, .body = try collections.get(allocator, collection_name) orelse unreachable };
+        if (std.mem.eql(u8, request.method, "GET")) return .{ .status = 200, .body = try collections.get(allocator, manager, collection_name) orelse unreachable };
+        if (std.mem.eql(u8, request.method, "DELETE")) {
+            const deleted = try collections.delete(manager, collection_name);
+            return response(allocator, if (deleted) 200 else 404, if (deleted) "{\"deleted\":true}" else "{\"error\":\"collection_not_found\"}");
+        }
+        return response(allocator, 405, "{\"error\":\"method_not_allowed\"}");
     }
 
     const resource = tail[slash + 1 ..];
