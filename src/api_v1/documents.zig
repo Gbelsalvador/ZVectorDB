@@ -20,7 +20,7 @@ pub fn get(allocator: std.mem.Allocator, engine: *const Engine, id: usize) !?[]u
     if (id >= engine.documents.items.len) return null;
     const encoded = try json.jsonString(allocator, engine.documents.items[id].content);
     defer allocator.free(encoded);
-    return std.fmt.allocPrint(allocator, "{{\"id\":{d},\"content\":{s}}}", .{ id, encoded });
+    return try std.fmt.allocPrint(allocator, "{{\"id\":{d},\"content\":{s}}}", .{ id, encoded });
 }
 
 pub fn create(allocator: std.mem.Allocator, engine: *Engine, io: std.Io, content: []const u8) ![]u8 {
