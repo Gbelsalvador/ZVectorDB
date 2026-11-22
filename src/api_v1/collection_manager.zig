@@ -150,7 +150,7 @@ pub const Manager = struct {
             try writer.interface.flush();
             try file.sync(self.io);
         }
-        try std.Io.Dir.cwd().rename(registry_temp_path, self.io, std.Io.Dir.cwd(), registry_path);
+        try std.Io.Dir.cwd().rename(registry_temp_path, std.Io.Dir.cwd(), registry_path, self.io);
     }
 };
 
