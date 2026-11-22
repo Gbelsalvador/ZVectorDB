@@ -23,5 +23,5 @@ pub fn execute(allocator: std.mem.Allocator, engine: *Engine, body: []const u8) 
         try output.writer.print("{{\"id\":{d},\"score\":{d},\"content\":{s}}}", .{ result.document_id, result.score, encoded });
     }
     try output.writer.writeAll("]}");
-    return output.toOwnedSlice();
+    return try output.toOwnedSlice();
 }
