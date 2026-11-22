@@ -13,7 +13,7 @@ pub fn get(allocator: std.mem.Allocator, manager: *Manager, name: []const u8) !?
     if (manager.get(name) == null) return null;
     const encoded = try json.jsonString(allocator, name);
     defer allocator.free(encoded);
-    return std.fmt.allocPrint(allocator, "{{\"name\":{s}}}", .{encoded});
+    return try std.fmt.allocPrint(allocator, "{{\"name\":{s}}}", .{encoded});
 }
 
 pub fn create(manager: *Manager, name: []const u8) !void {
