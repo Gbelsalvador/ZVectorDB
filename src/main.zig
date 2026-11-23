@@ -44,7 +44,15 @@ pub fn main(init: std.process.Init) !void {
     defer restoreConsoleCodePages(original_code_pages);
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len > 1 and std.mem.eql(u8, args[1], "serve")) {
+    for (args) |id| printColored(ansi.cyan, "[{d}] {s}\n", .{ id, args.items[id].content });
+    printColored(
+        ansi.yellow,
+        "le valeur de args : {d}\n",
+        .{
+            args.len,
+        },
+    );
+    if (args.len > 1 and (std.mem.eql(u8, args[1], "server") or std.mem.eql(u8, args[1], "serve"))) {
         const port: u16 = if (args.len > 2) try std.fmt.parseInt(u16, args[2], 10) else 8080;
         var manager = try ApiV1.CollectionManager.init(allocator, init.io);
         defer manager.deinit();
