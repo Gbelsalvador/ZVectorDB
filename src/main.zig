@@ -44,16 +44,21 @@ pub fn main(init: std.process.Init) !void {
     defer restoreConsoleCodePages(original_code_pages);
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    for (args) |id| printColored(ansi.cyan, "[{d}] {s}\n", .{ id, args.items[id].content });
-    printColored(
-        ansi.yellow,
-        "le valeur de args : {d}\n",
-        .{
-            args.len,
-        },
-    );
-    if (args.len > 1 and (std.mem.eql(u8, args[1], "server") or std.mem.eql(u8, args[1], "serve"))) {
-        const port: u16 = if (args.len > 2) try std.fmt.parseInt(u16, args[2], 10) else 8080;
+
+    // `zig build run` peut exposer les arguments différemment selon le runner:
+    // chercher la sous-commande évite de dépendre de la présence d'argv[0].
+    var server_command_index: ?usize = null;
+    for (args, 0..) |arg, index| {
+        if (std.mem.eql(u8, arg, "server") or std.mem.eql(u8, arg, "serve")) {
+            server_command_index = index;
+            break;
+        }
+    }
+    if (server_command_index) |command_index| {
+        const port: u16 = if (command_index + 1 < args.len)
+            try std.fmt.parseInt(u16, args[command_index + 1], 10)
+        else
+            8080;
         var manager = try ApiV1.CollectionManager.init(allocator, init.io);
         defer manager.deinit();
         try ApiV1.HttpServer.serve(init.io, allocator, &manager, port);
