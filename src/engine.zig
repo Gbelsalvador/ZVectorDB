@@ -10,6 +10,7 @@ const query_engine = @import("query_engine.zig");
 const SearchResult = @import("search_result.zig").SearchResult;
 const VectorSearchResult = @import("vector_index.zig").SearchResult;
 const vector_math = @import("vector.zig");
+const RwLock = @import("concurrency.zig").RwLock;
 
 const Wal = wal_mod.wal;
 const Operation = wal_mod.Operation;
@@ -166,6 +167,8 @@ pub const AddDocumentResult = struct {
 
 pub const Engine = struct {
     allocator: std.mem.Allocator,
+    /// Shared reads and exclusive mutations prevent readers from observing partial index updates.
+    index_lock: RwLock = .{},
     index: InvertedIndex,
     vector_index: VectorIndex,
     hnsw: HNSW,
@@ -239,6 +242,8 @@ pub const Engine = struct {
     }
 
     pub fn addDocument(self: *Engine, io: anytype, content: []const u8) !AddDocumentResult {
+        self.index_lock.lock();
+        defer self.index_lock.unlock();
         const owned = try self.allocator.dupe(u8, content);
         var transferred = false;
         errdefer if (!transferred) self.allocator.free(owned);
@@ -251,6 +256,8 @@ pub const Engine = struct {
     }
 
     pub fn updateDocument(self: *Engine, io: anytype, id: usize, content: []const u8) !void {
+        self.index_lock.lock();
+        defer self.index_lock.unlock();
         if (id >= self.documents.items.len) return error.DocumentNotFound;
         const owned = try self.allocator.dupe(u8, content);
         self.allocator.free(self.documents.items[id].content);
@@ -260,6 +267,8 @@ pub const Engine = struct {
     }
 
     pub fn deleteDocument(self: *Engine, io: anytype, id: usize) !void {
+        self.index_lock.lock();
+        defer self.index_lock.unlock();
         if (id >= self.documents.items.len) return error.DocumentNotFound;
 
         // Document and vector IDs share the same positional namespace for
@@ -293,6 +302,8 @@ pub const Engine = struct {
     }
 
     pub fn setDimension(self: *Engine, io: anytype, dimension: usize) !void {
+        self.index_lock.lock();
+        defer self.index_lock.unlock();
         if (dimension == 0) return error.InvalidDimension;
         if (self.vector_index.count != 0) return error.DimensionLocked;
         self.vector_index.dimension = dimension;
@@ -302,6 +313,8 @@ pub const Engine = struct {
     }
 
     pub fn addVector(self: *Engine, io: anytype, values: []const f64) !usize {
+        self.index_lock.lock();
+        defer self.index_lock.unlock();
         const id = try self.vector_index.add(values);
         try self.insertHnswVector(values, id);
         try self.persistVectorData(io);
@@ -309,6 +322,8 @@ pub const Engine = struct {
     }
 
     pub fn updateVector(self: *Engine, io: anytype, id: usize, values: []const f64) !void {
+        self.index_lock.lock();
+        defer self.index_lock.unlock();
         if (id >= self.vector_index.count) return error.VectorNotFound;
         if (values.len != self.vector_index.dimension) return error.InvalidDimension;
         const start = id * self.vector_index.dimension;
@@ -318,6 +333,8 @@ pub const Engine = struct {
     }
 
     pub fn deleteVector(self: *Engine, io: anytype, id: usize) !void {
+        self.index_lock.lock();
+        defer self.index_lock.unlock();
         if (id >= self.vector_index.count) return error.VectorNotFound;
         const start = id * self.vector_index.dimension;
         const end = start + self.vector_index.dimension;
@@ -330,15 +347,21 @@ pub const Engine = struct {
     }
 
     pub fn searchText(self: *Engine, query: []const u8) ![]SearchResult {
+        self.index_lock.lockShared();
+        defer self.index_lock.unlockShared();
         var search = SearchEngine.init(self.allocator, &self.index);
         return search.search(query);
     }
 
-    pub fn searchAnd(self: *const Engine, left: []const u8, right: []const u8) ![]usize {
+    pub fn searchAnd(self: *Engine, left: []const u8, right: []const u8) ![]usize {
+        self.index_lock.lockShared();
+        defer self.index_lock.unlockShared();
         return self.index.searchAnd(left, right);
     }
 
     pub fn searchExact(self: *Engine, query: []const f64, top_k: usize) ![]VectorSearchResult {
+        self.index_lock.lockShared();
+        defer self.index_lock.unlockShared();
         return self.vector_index.search(query, self.allocator, top_k);
     }
 
@@ -348,6 +371,8 @@ pub const Engine = struct {
         top_k: usize,
         stats: *vector_math.DistanceStats,
     ) ![]@import("hnsw.zig").Candidate {
+        self.index_lock.lockShared();
+        defer self.index_lock.unlockShared();
         if (query.len != self.vector_index.dimension) return error.InvalidDimension;
         const converted = try self.allocator.alloc(f32, query.len);
         defer self.allocator.free(converted);
@@ -355,8 +380,19 @@ pub const Engine = struct {
         return self.hnsw.search(converted, self.allocator, top_k, stats);
     }
 
-    pub fn planQuery(self: *const Engine, text_query: []const u8, has_vector_query: bool) query_engine.Plan {
+    pub fn planQuery(self: *Engine, text_query: []const u8, has_vector_query: bool) query_engine.Plan {
+        self.index_lock.lockShared();
+        defer self.index_lock.unlockShared();
         return query_engine.createPlan(text_query, has_vector_query, self.documents.items.len, self.vector_index.count);
+    }
+
+    /// Return owned bytes so a response cannot retain a pointer into a document
+    /// that a concurrent update or delete frees.
+    pub fn documentContentDup(self: *Engine, id: usize) !?[]u8 {
+        self.index_lock.lockShared();
+        defer self.index_lock.unlockShared();
+        if (id >= self.documents.items.len) return null;
+        return try self.allocator.dupe(u8, self.documents.items[id].content);
     }
 
     pub fn executeQuery(

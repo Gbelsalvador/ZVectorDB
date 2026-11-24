@@ -2,7 +2,9 @@ const std = @import("std");
 const Engine = @import("../engine.zig").Engine;
 const json = @import("json.zig");
 
-pub fn list(allocator: std.mem.Allocator, engine: *const Engine) ![]u8 {
+pub fn list(allocator: std.mem.Allocator, engine: *Engine) ![]u8 {
+    engine.index_lock.lockShared();
+    defer engine.index_lock.unlockShared();
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
     try output.writer.writeAll("{\"documents\":[");
@@ -16,7 +18,9 @@ pub fn list(allocator: std.mem.Allocator, engine: *const Engine) ![]u8 {
     return output.toOwnedSlice();
 }
 
-pub fn get(allocator: std.mem.Allocator, engine: *const Engine, id: usize) !?[]u8 {
+pub fn get(allocator: std.mem.Allocator, engine: *Engine, id: usize) !?[]u8 {
+    engine.index_lock.lockShared();
+    defer engine.index_lock.unlockShared();
     if (id >= engine.documents.items.len) return null;
     const encoded = try json.jsonString(allocator, engine.documents.items[id].content);
     defer allocator.free(encoded);
@@ -31,13 +35,17 @@ pub fn create(allocator: std.mem.Allocator, engine: *Engine, io: std.Io, content
 }
 
 pub fn update(allocator: std.mem.Allocator, engine: *Engine, io: std.Io, id: usize, content: []const u8) !?[]u8 {
-    if (id >= engine.documents.items.len) return null;
-    try engine.updateDocument(io, id, content);
+    engine.updateDocument(io, id, content) catch |err| switch (err) {
+        error.DocumentNotFound => return null,
+        else => return err,
+    };
     return get(allocator, engine, id);
 }
 
 pub fn delete(engine: *Engine, io: std.Io, id: usize) !bool {
-    if (id >= engine.documents.items.len) return false;
-    try engine.deleteDocument(io, id);
+    engine.deleteDocument(io, id) catch |err| switch (err) {
+        error.DocumentNotFound => return false,
+        else => return err,
+    };
     return true;
 }

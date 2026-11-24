@@ -104,6 +104,16 @@ zvectordb> train langage 100
 
 `train <mot> [époques]` entraîne un modèle Word2Vec sur les documents et affiche les cinq voisins du mot. Le modèle Word2Vec reste temporaire; les documents et les vecteurs de la CLI sont conservés dans `zvectordb.db`, et le graphe HNSW dans `zvectordb.hnsw`, dans le répertoire courant. Le stockage WAL/snapshot et mmap existent comme modules expérimentaux séparés.
 
+## Benchmark HNSW
+
+Lancez le benchmark avec:
+
+```sh
+zig build benchmark
+```
+
+Il construit un index de 10 000 vecteurs de 128 dimensions puis exécute 1 000 recherches HNSW. Le rapport affiche le débit, la latence moyenne, P50/P95/P99, le temps CPU du processus, son working set mémoire, et le nombre/volume des allocations effectuées par les recherches. Les métriques système CPU et RAM sont disponibles sous Windows; les compteurs d'allocations des recherches sont suivis par l'allocateur de mesure.
+
 ## API HTTP v1
 
 Le serveur HTTP expose le moteur sur `127.0.0.1` (port `8080` par défaut). Lancez-le avec:
