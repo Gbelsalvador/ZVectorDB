@@ -12,8 +12,17 @@ pub fn serve(io: std.Io, allocator: std.mem.Allocator, manager: *Manager, port: 
     std.debug.print("API v1 en écoute sur http://127.0.0.1:{d}/api/v1\n", .{port});
     while (true) {
         const stream = try server.accept(io);
-        handleConnection(io, allocator, manager, stream) catch |err| std.log.warn("HTTP request ignored: {s}", .{@errorName(err)});
+        const thread = std.Thread.spawn(.{}, handleConnectionThread, .{ io, allocator, manager, stream }) catch |err| {
+            stream.close(io);
+            std.log.warn("HTTP worker could not start: {s}", .{@errorName(err)});
+            continue;
+        };
+        thread.detach();
     }
+}
+
+fn handleConnectionThread(io: std.Io, allocator: std.mem.Allocator, manager: *Manager, stream: std.Io.net.Stream) void {
+    handleConnection(io, allocator, manager, stream) catch |err| std.log.warn("HTTP request ignored: {s}", .{@errorName(err)});
 }
 
 fn handleConnection(io: std.Io, allocator: std.mem.Allocator, manager: *Manager, stream: std.Io.net.Stream) !void {

@@ -14,10 +14,9 @@ pub fn execute(allocator: std.mem.Allocator, engine: *Engine, body: []const u8) 
     try output.writer.writeAll("{\"results\":[");
     for (results, 0..) |result, index| {
         if (index != 0) try output.writer.writeAll(",");
-        const content = if (result.document_id < engine.documents.items.len)
-            engine.documents.items[result.document_id].content
-        else
-            "";
+        const maybe_content = try engine.documentContentDup(result.document_id);
+        const content = maybe_content orelse "";
+        defer if (maybe_content) |owned| allocator.free(owned);
         const encoded = try json.jsonString(allocator, content);
         defer allocator.free(encoded);
         try output.writer.print("{{\"id\":{d},\"score\":{d},\"content\":{s}}}", .{ result.document_id, result.score, encoded });
