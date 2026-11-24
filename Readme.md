@@ -109,7 +109,7 @@ zvectordb> train langage 100
 Le serveur HTTP expose le moteur sur `127.0.0.1` (port `8080` par défaut). Lancez-le avec:
 
 ```sh
-zig build run -- serve [port]
+zig build run -- server [port]
 ```
 
 Routes disponibles:
