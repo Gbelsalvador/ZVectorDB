@@ -10,6 +10,7 @@ const query_engine = @import("query_engine.zig");
 const SearchResult = @import("search_result.zig").SearchResult;
 const VectorSearchResult = @import("vector_index.zig").SearchResult;
 const vector_math = @import("vector.zig");
+const RwLock = @import("concurrency.zig").RwLock;
 
 const Wal = wal_mod.wal;
 const Operation = wal_mod.Operation;
@@ -167,7 +168,7 @@ pub const AddDocumentResult = struct {
 pub const Engine = struct {
     allocator: std.mem.Allocator,
     /// Shared reads and exclusive mutations prevent readers from observing partial index updates.
-    index_lock: std.Thread.RwLock = .{},
+    index_lock: RwLock = .{},
     index: InvertedIndex,
     vector_index: VectorIndex,
     hnsw: HNSW,
