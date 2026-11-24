@@ -1,5 +1,11 @@
 const std = @import("std");
 const vector = @import("vector.zig");
+const stack_visit_words = 512;
+
+fn inverseNorm(values: []const f32) f32 {
+    const norm = vector.magnitude(values);
+    return if (norm == 0) 0 else 1.0 / norm;
+}
 
 pub const Node = struct {
     id: usize,
@@ -61,8 +67,7 @@ pub const HNSW = struct {
     entry_point: ?usize,
     max_level: usize,
     vectors: std.ArrayList(f32),
-    visit_marks: std.ArrayList(usize),
-    visit_generation: usize,
+    inverse_norms: std.ArrayList(f32),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -82,8 +87,7 @@ pub const HNSW = struct {
             .entry_point = null,
             .max_level = 0,
             .vectors = std.ArrayList(f32).empty,
-            .visit_marks = std.ArrayList(usize).empty,
-            .visit_generation = 0,
+            .inverse_norms = std.ArrayList(f32).empty,
         };
     }
 
@@ -99,7 +103,7 @@ pub const HNSW = struct {
         }
         self.nodes.deinit(self.allocator);
         self.vectors.deinit(self.allocator);
-        self.visit_marks.deinit(self.allocator);
+        self.inverse_norms.deinit(self.allocator);
     }
 
     pub fn save(self: *const HNSW, io: anytype, path: []const u8, source_vectors: []const f64) !void {
@@ -171,11 +175,15 @@ pub const HNSW = struct {
         errdefer graph.deinit();
         const vector_count = std.math.mul(usize, source_vectors.len / dimension, dimension) catch return error.InvalidGraph;
         try graph.vectors.ensureTotalCapacity(allocator, vector_count);
-        for (source_vectors) |value| graph.vectors.appendAssumeCapacity(@floatCast(value));
+        try graph.inverse_norms.ensureTotalCapacity(allocator, source_vectors.len / dimension);
+        for (0..source_vectors.len / dimension) |id| {
+            const start = id * dimension;
+            for (source_vectors[start .. start + dimension]) |value| graph.vectors.appendAssumeCapacity(@floatCast(value));
+            graph.inverse_norms.appendAssumeCapacity(inverseNorm(graph.vectors.items[start .. start + dimension]));
+        }
 
         const node_count: usize = @intCast(header.node_count);
         try graph.nodes.ensureTotalCapacity(allocator, node_count);
-        try graph.visit_marks.ensureTotalCapacity(allocator, node_count);
         for (0..node_count) |id| {
             const levels = try readNodeLevels(&reader, allocator, node_count, m);
             graph.nodes.appendAssumeCapacity(.{
@@ -183,7 +191,6 @@ pub const HNSW = struct {
                 .vector_offset = id * dimension,
                 .levels = levels,
             });
-            graph.visit_marks.appendAssumeCapacity(0);
         }
 
         if (node_count == 0) {
@@ -222,6 +229,12 @@ pub const HNSW = struct {
             self.dimension];
     }
 
+    fn similarityScore(self: *HNSW, query: []const f32, id: usize, query_inverse_norm: f32, stats: ?*vector.DistanceStats) f32 {
+        if (stats) |s| s.comparisons += 1;
+        if (query_inverse_norm == 0 or self.inverse_norms.items[id] == 0) return 0;
+        return vector.dotSIMD(query, self.getVector(id)) * query_inverse_norm * self.inverse_norms.items[id];
+    }
+
     pub fn insert(
         self: *HNSW,
         embedding: []const f32,
@@ -236,7 +249,7 @@ pub const HNSW = struct {
         const id =
             self.nodes.items.len;
 
-        try self.visit_marks.ensureTotalCapacity(self.allocator, id + 1);
+        try self.inverse_norms.ensureTotalCapacity(self.allocator, id + 1);
         const vector_offset =
             self.vectors.items.len;
 
@@ -244,6 +257,7 @@ pub const HNSW = struct {
             self.allocator,
             embedding,
         );
+        self.inverse_norms.appendAssumeCapacity(inverseNorm(embedding));
 
         const level =
             RandomLevel(random);
@@ -268,8 +282,6 @@ pub const HNSW = struct {
             .vector_offset = vector_offset,
             .levels = levels,
         });
-        self.visit_marks.appendAssumeCapacity(0);
-
         if (self.entry_point == null) {
             self.entry_point = id;
             self.max_level = level;
@@ -277,13 +289,14 @@ pub const HNSW = struct {
             return id;
         }
 
+        const query_inverse_norm = inverseNorm(embedding);
         var current =
             self.entry_point.?;
 
         var current_level = self.max_level;
 
         while (current_level > level) : (current_level -= 1) {
-            current = self.greedySearch(embedding, current, current_level, null);
+            current = self.greedySearch(embedding, current, current_level, query_inverse_norm, null);
             if (current_level == 0) break;
         }
 
@@ -296,6 +309,7 @@ pub const HNSW = struct {
                 self.ef_construction,
                 self.allocator,
                 null,
+                query_inverse_norm,
             );
             defer self.allocator.free(layer_candidates);
 
@@ -403,6 +417,7 @@ pub const HNSW = struct {
         query: []const f32,
         entry: usize,
         level: usize,
+        query_inverse_norm: f32,
         stats: ?*vector.DistanceStats,
     ) usize {
         var current = entry;
@@ -416,7 +431,7 @@ pub const HNSW = struct {
             // );
             var best = current;
 
-            var best_score = if (stats) |s| vector.cosineSimilarityCounted(query, self.getVector(current), s) else vector.cosineSimilarity(query, self.getVector(current));
+            var best_score = self.similarityScore(query, current, query_inverse_norm, stats);
 
             const node = &self.nodes.items[current];
 
@@ -426,11 +441,7 @@ pub const HNSW = struct {
             for (node.levels.items[level].items) |neighbor_id| {
                 //const neighbor_vector = self.getVector(neighbor_id);
 
-                const score = if (stats) |s| vector.cosineSimilarityCounted(
-                    query,
-                    self.getVector(neighbor_id),
-                    s,
-                ) else vector.cosineSimilarity(query, self.getVector(neighbor_id));
+                const score = self.similarityScore(query, neighbor_id, query_inverse_norm, stats);
 
                 if (score > best_score) {
                     best = neighbor_id;
@@ -451,6 +462,7 @@ pub const HNSW = struct {
         ef: usize,
         allocator: std.mem.Allocator,
         stats: ?*vector.DistanceStats,
+        query_inverse_norm: f32,
     ) ![]Candidate {
         var candidates = CandidateQueue{
             .items = &.{},
@@ -458,7 +470,7 @@ pub const HNSW = struct {
             .context = {},
         };
 
-        defer candidates.deinit(self.allocator);
+        defer candidates.deinit(allocator);
 
         var resultsQ = ResultQueue{
             .items = &.{},
@@ -466,28 +478,36 @@ pub const HNSW = struct {
             .context = {},
         };
 
-        defer resultsQ.deinit(self.allocator);
+        defer resultsQ.deinit(allocator);
 
-        self.visit_generation +%= 1;
-        if (self.visit_generation == 0) {
-            @memset(self.visit_marks.items, 0);
-            self.visit_generation = 1;
-        }
-        const visit_generation = self.visit_generation;
+        // The result heap is bounded by ef. Reserving up front avoids repeated
+        // growth allocations while exploring the neighborhood.
+        try candidates.ensureTotalCapacity(allocator, ef);
+        try resultsQ.ensureTotalCapacity(allocator, ef);
+
+        const visited_word_count = self.nodes.items.len / @bitSizeOf(usize) +
+            @intFromBool(self.nodes.items.len % @bitSizeOf(usize) != 0);
+        var stack_visited: [stack_visit_words]usize = undefined;
+        const visited = if (visited_word_count <= stack_visited.len)
+            stack_visited[0..visited_word_count]
+        else
+            try allocator.alloc(usize, visited_word_count);
+        defer if (visited_word_count > stack_visited.len) allocator.free(visited);
+        @memset(visited, 0);
 
         // var results =
         //     std.ArrayList(Candidate).empty;
 
-        const initial_score = if (stats) |s| vector.cosineSimilarityCounted(query, self.getVector(entry_point), s) else vector.cosineSimilarity(query, self.getVector(entry_point));
+        const initial_score = self.similarityScore(query, entry_point, query_inverse_norm, stats);
         const initial = Candidate{
             .id = entry_point,
             .score = initial_score,
         };
 
-        try candidates.push(self.allocator, initial);
-        try resultsQ.push(self.allocator, initial);
+        try candidates.push(allocator, initial);
+        try resultsQ.push(allocator, initial);
 
-        self.visit_marks.items[entry_point] = visit_generation;
+        visited[entry_point / @bitSizeOf(usize)] |= @as(usize, 1) << @intCast(entry_point % @bitSizeOf(usize));
 
         while (candidates.count() > 0) {
             const best =
@@ -511,28 +531,21 @@ pub const HNSW = struct {
             }
 
             for (node.levels.items[level].items) |neighbor_id| {
-                if (self.visit_marks.items[neighbor_id] == visit_generation) {
+                const visited_mask = @as(usize, 1) << @intCast(neighbor_id % @bitSizeOf(usize));
+                const visited_word = neighbor_id / @bitSizeOf(usize);
+                if (visited[visited_word] & visited_mask != 0) {
                     continue;
                 }
 
-                self.visit_marks.items[neighbor_id] = visit_generation;
+                visited[visited_word] |= visited_mask;
 
-                const neighbor_score = if (stats) |s|
-                    vector.cosineSimilarityCounted(
-                        query,
-                        self.getVector(
-                            neighbor_id,
-                        ),
-                        s,
-                    )
-                else
-                    vector.cosineSimilarity(query, self.getVector(neighbor_id));
+                const neighbor_score = self.similarityScore(query, neighbor_id, query_inverse_norm, stats);
 
                 if (resultsQ.count() < ef or neighbor_score > resultsQ.peek().?.score) {
                     const c = Candidate{ .id = neighbor_id, .score = neighbor_score };
 
-                    try candidates.push(self.allocator, c);
-                    try resultsQ.push(self.allocator, c);
+                    try candidates.push(allocator, c);
+                    try resultsQ.push(allocator, c);
 
                     if (resultsQ.count() > ef) {
                         _ = resultsQ.pop();
@@ -541,10 +554,7 @@ pub const HNSW = struct {
             }
         }
 
-        var output = try allocator.alloc(
-            Candidate,
-            resultsQ.count(),
-        );
+        const output = try allocator.alloc(Candidate, resultsQ.count());
         var i: usize = 0;
 
         while (resultsQ.count() > 0) {
@@ -641,9 +651,10 @@ pub const HNSW = struct {
 
         var level =
             self.max_level;
+        const query_inverse_norm = inverseNorm(query);
 
         while (level > 0) : (level -= 1) {
-            current = self.greedySearch(query, current, level, stats);
+            current = self.greedySearch(query, current, level, query_inverse_norm, stats);
         }
         const search_ef = @max(self.ef_search, top_k);
         const candidates =
@@ -654,25 +665,14 @@ pub const HNSW = struct {
                 search_ef,
                 allocator,
                 stats,
+                query_inverse_norm,
             );
 
         if (candidates.len > top_k) {
-            const output =
-                try allocator.alloc(
-                    Candidate,
-                    top_k,
-                );
-
-            @memcpy(
-                output,
-                candidates[0..top_k],
-            );
-
-            allocator.free(
-                candidates,
-            );
-
-            return output;
+            return allocator.realloc(candidates, top_k) catch |err| {
+                allocator.free(candidates);
+                return err;
+            };
         }
 
         return candidates;

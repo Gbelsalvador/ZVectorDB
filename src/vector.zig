@@ -111,7 +111,7 @@ pub fn cosineSimilaritySIMDFused(
     const Vec =
         @Vector(width, f32);
 
-    const dot_prod: Vec =
+    var dot_prod: Vec =
         @splat(0.0);
 
     var normA: Vec =
@@ -129,7 +129,7 @@ pub fn cosineSimilaritySIMDFused(
         const vb: Vec =
             b[i .. i + width][0..width].*;
 
-        dot += va * vb;
+        dot_prod += va * vb;
         normA += va * va;
         normB += vb * vb;
     }
@@ -211,17 +211,7 @@ pub fn cosineSimilarity(
     b: []const f32,
 ) f32 {
     std.debug.assert(a.len == b.len);
-
-    const dot_product = dot(a, b);
-
-    const magnitude_a = magnitude(a);
-    const magnitude_b = magnitude(b);
-
-    if (magnitude_a == 0.0 or magnitude_b == 0.0) {
-        return 0.0;
-    }
-
-    return dot_product / (magnitude_a * magnitude_b);
+    return cosineSimilaritySIMDFused(a, b);
 }
 
 pub fn cosineSimilarityF64(a: []const f64, b: []const f64) f64 {
@@ -243,18 +233,5 @@ pub fn cosineSimilarityCounted(
     stats: *DistanceStats,
 ) f32 {
     stats.comparisons += 1;
-    std.debug.assert(
-        a.len == b.len,
-    );
-
-    const dot_product = dot(a, b);
-
-    const magnitude_a = magnitude(a);
-    const magnitude_b = magnitude(b);
-
-    if (magnitude_a == 0.0 or magnitude_b == 0.0) {
-        return 0.0;
-    }
-
-    return dot_product / (magnitude_a * magnitude_b);
+    return cosineSimilaritySIMDFused(a, b);
 }

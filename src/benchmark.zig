@@ -138,17 +138,15 @@ pub fn main(init: std.process.Init) !void {
 
     const latencies = try base_allocator.alloc(u64, QUERY_COUNT);
     defer base_allocator.free(latencies);
-    var counted = CountingAllocator{ .child = base_allocator };
-    const query_allocator = counted.allocator();
     const process_before = processMetrics();
     const run_start = std.Io.Clock.awake.now(io);
 
     for (latencies) |*latency| {
         var stats = vector.DistanceStats{};
         const start = std.Io.Clock.awake.now(io);
-        const results = try hnsw.search(query, query_allocator, K, &stats);
+        const results = try hnsw.search(query, base_allocator, K, &stats);
         latency.* = @intCast(start.untilNow(io, .awake).nanoseconds);
-        query_allocator.free(results);
+        base_allocator.free(results);
     }
 
     const elapsed = run_start.untilNow(io, .awake).nanoseconds;
@@ -156,6 +154,16 @@ pub fn main(init: std.process.Init) !void {
     std.sort.pdq(u64, latencies, {}, std.sort.asc(u64));
     const elapsed_ns: u64 = @intCast(@max(1, elapsed));
     const throughput = @as(f64, @floatFromInt(QUERY_COUNT)) * 1_000_000_000.0 / @as(f64, @floatFromInt(elapsed_ns));
+
+    // Count every temporary HNSW search allocation in a separate pass so the
+    // tracking allocator does not distort the latency/throughput results.
+    var counted = CountingAllocator{ .child = base_allocator };
+    const counting_allocator = counted.allocator();
+    for (0..QUERY_COUNT) |_| {
+        var stats = vector.DistanceStats{};
+        const results = try hnsw.search(query, counting_allocator, K, &stats);
+        counting_allocator.free(results);
+    }
 
     std.debug.print(
         \\HNSW benchmark ({d} vectors, {d} dimensions, {d} queries)

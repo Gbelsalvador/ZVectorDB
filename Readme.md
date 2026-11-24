@@ -114,6 +114,19 @@ zig build benchmark
 
 Il construit un index de 10 000 vecteurs de 128 dimensions puis exécute 1 000 recherches HNSW. Le rapport affiche le débit, la latence moyenne, P50/P95/P99, le temps CPU du processus, son working set mémoire, et le nombre/volume des allocations effectuées par les recherches. Les métriques système CPU et RAM sont disponibles sous Windows; les compteurs d'allocations des recherches sont suivis par l'allocateur de mesure.
 
+Première mesure de référence avec `ReleaseFast`:
+
+| Mesure | Résultat |
+|---|---:|
+| Débit | 8 224,45 recherches/s |
+| Latence moyenne | 121,59 µs |
+| P50 | 112,10 µs |
+| P95 | 161,70 µs |
+| P99 | 212,60 µs |
+| CPU processus | 102,8 % |
+| Working set RAM | 21,33 MiB |
+| Allocations | 5 000 appels, 7 760 000 octets alloués, pic de 7 360 octets vivants |
+
 ## API HTTP v1
 
 Le serveur HTTP expose le moteur sur `127.0.0.1` (port `8080` par défaut). Lancez-le avec:
