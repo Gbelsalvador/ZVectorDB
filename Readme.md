@@ -152,6 +152,19 @@ Première mesure de référence avec `ReleaseFast`:
 | Working set RAM | 21,33 MiB |
 | Allocations | 5 000 appels, 7 760 000 octets alloués, pic de 7 360 octets vivants |
 
+Deux exécutions supplémentaires observées sous Windows (configuration de build non précisée):
+
+| Mesure | Exécution 1 | Exécution 2 | Moyenne |
+|---|---:|---:|---:|
+| Débit | 834,26 recherches/s | 994,64 recherches/s | 914,45 recherches/s |
+| Latence moyenne | 1 198,66 µs | 1 005,39 µs | 1 102,03 µs |
+| P50 | 1 048,10 µs | 921,70 µs | — |
+| P95 | 1 917,90 µs | 1 410,70 µs | — |
+| P99 | 2 585,30 µs | 1 852,80 µs | — |
+| CPU processus | 99,1 % | 101,0 % | 100,1 % |
+| Working set RAM | 142,46 MiB | 142,03 MiB | 142,25 MiB |
+| Allocations | 5 000 appels, 7 760 000 octets, pic de 7 360 octets vivants | 5 000 appels, 7 760 000 octets, pic de 7 360 octets vivants | Identiques |
+
 ## API HTTP v1
 
 Le serveur HTTP expose le moteur sur `127.0.0.1` (port `8080` par défaut). Lancez-le avec:
