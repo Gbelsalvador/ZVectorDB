@@ -137,7 +137,7 @@ Lancez le benchmark avec:
 zig build benchmark
 ```
 
-Il construit un index de 10 000 vecteurs de 128 dimensions (graine fixe), échauffe le chemin de recherche avec 200 requêtes, puis exécute cinq séries de 1 000 recherches sur 1 000 requêtes déterministes. Le rapport affiche le mode de compilation, les paramètres HNSW (`M`, `ef_construction`, `ef_search`, `top_k`), le débit global et sa plage par série, ainsi que les latences moyenne, P50/P95/P99 sur les 5 000 recherches. Il affiche aussi le temps CPU du processus, son working set mémoire et les allocations temporaires comptées dans une passe distincte. Les métriques système CPU et RAM sont disponibles sous Windows. Pour comparer des changements, utilisez le même mode de compilation et les mêmes paramètres.
+Il construit un index de 10 000 vecteurs de 128 dimensions (graine fixe), échauffe le chemin de recherche avec 200 requêtes, puis exécute cinq séries de 1 000 recherches sur 1 000 requêtes déterministes. Le rapport affiche le mode de compilation, les paramètres HNSW (`M`, `ef_construction`, `ef_search`, `top_k`), le débit global et sa plage par série, ainsi que les latences moyenne, P50/P95/P99 sur les 5 000 recherches. Il affiche aussi le temps CPU du processus, son working set mémoire et les demandes au backing allocator pendant une passe séparée de 5 000 recherches après préchauffage du `SearchScratch`. Ces compteurs mesurent les allocations sous-jacentes, pas les allocations internes de l'arena. Les métriques système CPU et RAM sont disponibles sous Windows. Pour comparer des changements, utilisez le même mode de compilation et les mêmes paramètres.
 
 Mesure actuelle sous Windows avec `ReleaseFast` et le protocole ci-dessus:
 
@@ -151,7 +151,7 @@ Mesure actuelle sous Windows avec `ReleaseFast` et le protocole ci-dessus:
 | P99 | 878,50 µs |
 | CPU processus | 92,6 % |
 | Working set RAM | 24,94 MiB |
-| Allocations (passe séparée) | 26 980 appels, 51 155 200 octets, pic de 12 000 octets vivants |
+| Allocations (ancienne passe sans `SearchScratch`) | 26 980 appels, 51 155 200 octets, pic de 12 000 octets vivants |
 
 Ancienne référence `ReleaseFast`, mesurée avec le protocole précédent (une seule requête répétée 1 000 fois). Elle n'est pas directement comparable aux mesures du protocole actuel:
 

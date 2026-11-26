@@ -708,6 +708,31 @@ pub const HNSW = struct {
     }
 };
 
+/// Reuses temporary search allocations across calls. The returned candidate
+/// slice remains valid only until the next call to `search` or `deinit`.
+pub const SearchScratch = struct {
+    arena: std.heap.ArenaAllocator,
+
+    pub fn init(allocator: std.mem.Allocator) SearchScratch {
+        return .{ .arena = std.heap.ArenaAllocator.init(allocator) };
+    }
+
+    pub fn deinit(self: *SearchScratch) void {
+        self.arena.deinit();
+    }
+
+    pub fn search(
+        self: *SearchScratch,
+        hnsw: *HNSW,
+        query: []const f32,
+        top_k: usize,
+        stats: *vector.DistanceStats,
+    ) ![]Candidate {
+        _ = self.arena.reset(.retain_capacity);
+        return hnsw.search(query, self.arena.allocator(), top_k, stats);
+    }
+};
+
 fn fingerprintVectors(vectors: []const f64, dimension: usize) u64 {
     var hash: u64 = 14695981039346656037;
     const dimension_u64: u64 = @intCast(dimension);

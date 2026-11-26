@@ -32,6 +32,12 @@ const CountingAllocator = struct {
         return .{ .ptr = self, .vtable = &vtable };
     }
 
+    fn resetStats(self: *CountingAllocator) void {
+        self.allocations = 0;
+        self.allocated_bytes = 0;
+        self.peak_live_bytes = self.live_bytes;
+    }
+
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
         const result = self.child.rawAlloc(len, alignment, ret_addr) orelse return null;
@@ -144,11 +150,12 @@ pub fn main(init: std.process.Init) !void {
     const latencies = try base_allocator.alloc(u64, QUERY_COUNT * MEASURED_RUNS);
     defer base_allocator.free(latencies);
 
+    var timed_scratch = HNSW.SearchScratch.init(base_allocator);
+    defer timed_scratch.deinit();
     for (0..WARMUP_QUERIES) |i| {
         const query = queries[(i % QUERY_COUNT) * DIMENSION ..][0..DIMENSION];
         var stats = vector.DistanceStats{};
-        const results = try hnsw.search(query, base_allocator, K, &stats);
-        base_allocator.free(results);
+        _ = try timed_scratch.search(&hnsw, query, K, &stats);
     }
 
     const process_before = processMetrics();
@@ -160,9 +167,9 @@ pub fn main(init: std.process.Init) !void {
             const query = queries[i * DIMENSION ..][0..DIMENSION];
             var stats = vector.DistanceStats{};
             const start = std.Io.Clock.awake.now(io);
-            const results = try hnsw.search(query, base_allocator, K, &stats);
+            const results = try timed_scratch.search(&hnsw, query, K, &stats);
             latencies[run * QUERY_COUNT + i] = @intCast(start.untilNow(io, .awake).nanoseconds);
-            base_allocator.free(results);
+            _ = results;
         }
         const run_ns: u64 = @intCast(@max(1, run_start.untilNow(io, .awake).nanoseconds));
         elapsed_total += run_ns;
@@ -183,11 +190,20 @@ pub fn main(init: std.process.Init) !void {
     // tracking allocator does not distort the latency/throughput results.
     var counted = CountingAllocator{ .child = base_allocator };
     const counting_allocator = counted.allocator();
+    var counted_scratch = HNSW.SearchScratch.init(counting_allocator);
+    defer counted_scratch.deinit();
+    // Size the reusable scratch buffers against every query, then count only
+    // child-allocator requests made by the steady-state measured pass.
+    for (0..QUERY_COUNT) |i| {
+        var stats = vector.DistanceStats{};
+        const query = queries[i * DIMENSION ..][0..DIMENSION];
+        _ = try counted_scratch.search(&hnsw, query, K, &stats);
+    }
+    counted.resetStats();
     for (0..total_queries) |i| {
         var stats = vector.DistanceStats{};
         const query = queries[(i % QUERY_COUNT) * DIMENSION ..][0..DIMENSION];
-        const results = try hnsw.search(query, counting_allocator, K, &stats);
-        counting_allocator.free(results);
+        _ = try counted_scratch.search(&hnsw, query, K, &stats);
     }
 
     std.debug.print(
@@ -203,7 +219,7 @@ pub fn main(init: std.process.Init) !void {
         \\  P99: {d:.2} us
         \\  CPU: {s}
         \\  RAM working set: {s}
-        \\  Allocations: {d} calls, {d} bytes total, {d} bytes peak live
+        \\  Backing allocations after scratch warmup: {d} calls, {d} bytes, {d} bytes peak live
         \\
     , .{
         DATASET_SIZE,
