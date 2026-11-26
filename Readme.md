@@ -55,6 +55,31 @@ flowchart LR
 
 Le type `Document` actuellement utilisé par `Engine` est déclaré dans `engine.zig`; le fichier `src/document.zig` existe mais n'est pas encore relié à ce flux. `src/root.zig` exporte `Engine` comme module Zig. L'API HTTP v1 expose maintenant les opérations de base via des collections persistantes; les utilisateurs peuvent aussi continuer à passer par la CLI. Les composants WAL/snapshot et mmap restent expérimentaux et ne sont pas utilisés par l'Engine de la CLI.
 
+### Architecture du serveur HTTP v1
+
+Le serveur est une seconde entrée vers `Engine`, distincte de la CLI. Il reçoit des requêtes HTTP, les route vers les opérations JSON de l'API, puis délègue les opérations sur les documents et la recherche BM25 à l'`Engine` de la collection visée.
+
+```mermaid
+flowchart LR
+    Client["Client HTTP"] --> Main["main.zig<br/>commande server"]
+    Main --> Manager["CollectionManager<br/>registre + Engine par collection"]
+    Main --> Http["HttpServer<br/>écoute 127.0.0.1:8080"]
+    Http --> Pool["Pool de workers<br/>100 workers"]
+    Pool --> Router["Router<br/>méthode + route"]
+    Router --> Collections["Collections<br/>CRUD du registre"]
+    Router --> Documents["Documents<br/>CRUD JSON"]
+    Router --> Search["Recherche<br/>BM25"]
+    Collections --> Manager
+    Documents --> Engine["Engine de la collection"]
+    Search --> Engine
+    Manager --> Engine
+    Engine --> Index["Tokenizer + InvertedIndex<br/>SearchEngine + BM25"]
+    Engine --> Files["Fichiers persistants<br/>.db + .hnsw"]
+    Manager --> Registry[("zvectordb.collections")]
+```
+
+Au démarrage, `CollectionManager` charge le registre et ouvre un `Engine` par collection. Le serveur distribue chaque connexion à un worker; le routeur choisit ensuite le gestionnaire de collections, le CRUD de documents ou la recherche. Les réponses sont sérialisées en JSON. Le endpoint de recherche actuel utilise BM25; les fonctions vectorielles et hybrides disponibles via l'`Engine` ne sont pas encore exposées par ces routes HTTP.
+
 ## Démarrer la CLI
 
 Depuis la racine du projet:
