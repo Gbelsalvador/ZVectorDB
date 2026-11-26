@@ -1,12 +1,18 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const HNSW = @import("hnsw.zig").HNSW;
+const SearchScratch = @import("hnsw.zig").SearchScratch;
 const vector = @import("vector.zig");
 
 const DIMENSION = 128;
 const DATASET_SIZE = 10_000;
 const QUERY_COUNT = 1_000;
+const WARMUP_QUERIES = 200;
+const MEASURED_RUNS = 5;
 const K = 10;
+const M = 16;
+const EF_CONSTRUCTION = 100;
+const EF_SEARCH = 100;
 
 /// Counts allocations routed through this allocator and tracks live/peak bytes.
 const CountingAllocator = struct {
@@ -25,6 +31,12 @@ const CountingAllocator = struct {
 
     fn allocator(self: *CountingAllocator) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn resetStats(self: *CountingAllocator) void {
+        self.allocations = 0;
+        self.allocated_bytes = 0;
+        self.peak_live_bytes = self.live_bytes;
     }
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
@@ -125,67 +137,111 @@ pub fn main(init: std.process.Init) !void {
     defer base_allocator.free(dataset);
     for (dataset) |*value| value.* = random.float(f32) * 2.0 - 1.0;
 
-    var hnsw = HNSW.init(base_allocator, DIMENSION, 16, 100, 100);
+    var hnsw = HNSW.init(base_allocator, DIMENSION, M, EF_CONSTRUCTION, EF_SEARCH);
     defer hnsw.deinit();
     for (0..DATASET_SIZE) |id| {
         const start = id * DIMENSION;
         _ = try hnsw.insert(dataset[start .. start + DIMENSION], random);
     }
 
-    const query = try base_allocator.alloc(f32, DIMENSION);
-    defer base_allocator.free(query);
-    for (query) |*value| value.* = random.float(f32) * 2.0 - 1.0;
+    const queries = try base_allocator.alloc(f32, QUERY_COUNT * DIMENSION);
+    defer base_allocator.free(queries);
+    for (queries) |*value| value.* = random.float(f32) * 2.0 - 1.0;
 
-    const latencies = try base_allocator.alloc(u64, QUERY_COUNT);
+    const latencies = try base_allocator.alloc(u64, QUERY_COUNT * MEASURED_RUNS);
     defer base_allocator.free(latencies);
-    const process_before = processMetrics();
-    const run_start = std.Io.Clock.awake.now(io);
 
-    for (latencies) |*latency| {
+    var timed_scratch = SearchScratch.init(base_allocator);
+    defer timed_scratch.deinit();
+    for (0..WARMUP_QUERIES) |i| {
+        const query = queries[(i % QUERY_COUNT) * DIMENSION ..][0..DIMENSION];
         var stats = vector.DistanceStats{};
-        const start = std.Io.Clock.awake.now(io);
-        const results = try hnsw.search(query, base_allocator, K, &stats);
-        latency.* = @intCast(start.untilNow(io, .awake).nanoseconds);
-        base_allocator.free(results);
+        _ = try timed_scratch.search(&hnsw, query, K, &stats);
     }
 
-    const elapsed = run_start.untilNow(io, .awake).nanoseconds;
+    const process_before = processMetrics();
+    var elapsed_total: u64 = 0;
+    var run_throughputs: [MEASURED_RUNS]f64 = undefined;
+    for (0..MEASURED_RUNS) |run| {
+        const run_start = std.Io.Clock.awake.now(io);
+        for (0..QUERY_COUNT) |i| {
+            const query = queries[i * DIMENSION ..][0..DIMENSION];
+            var stats = vector.DistanceStats{};
+            const start = std.Io.Clock.awake.now(io);
+            const results = try timed_scratch.search(&hnsw, query, K, &stats);
+            latencies[run * QUERY_COUNT + i] = @intCast(start.untilNow(io, .awake).nanoseconds);
+            _ = results;
+        }
+        const run_ns: u64 = @intCast(@max(1, run_start.untilNow(io, .awake).nanoseconds));
+        elapsed_total += run_ns;
+        run_throughputs[run] = @as(f64, @floatFromInt(QUERY_COUNT)) * 1_000_000_000.0 / @as(f64, @floatFromInt(run_ns));
+    }
     const process_after = processMetrics();
     std.sort.pdq(u64, latencies, {}, std.sort.asc(u64));
-    const elapsed_ns: u64 = @intCast(@max(1, elapsed));
-    const throughput = @as(f64, @floatFromInt(QUERY_COUNT)) * 1_000_000_000.0 / @as(f64, @floatFromInt(elapsed_ns));
+    const total_queries = QUERY_COUNT * MEASURED_RUNS;
+    const throughput = @as(f64, @floatFromInt(total_queries)) * 1_000_000_000.0 / @as(f64, @floatFromInt(elapsed_total));
+    var min_run_throughput = run_throughputs[0];
+    var max_run_throughput = run_throughputs[0];
+    for (run_throughputs[1..]) |value| {
+        min_run_throughput = @min(min_run_throughput, value);
+        max_run_throughput = @max(max_run_throughput, value);
+    }
 
     // Count every temporary HNSW search allocation in a separate pass so the
     // tracking allocator does not distort the latency/throughput results.
     var counted = CountingAllocator{ .child = base_allocator };
     const counting_allocator = counted.allocator();
-    for (0..QUERY_COUNT) |_| {
+    var counted_scratch = SearchScratch.init(counting_allocator);
+    defer counted_scratch.deinit();
+    // Size the reusable scratch buffers against every query, then count only
+    // child-allocator requests made by the steady-state measured pass.
+    for (0..QUERY_COUNT) |i| {
         var stats = vector.DistanceStats{};
-        const results = try hnsw.search(query, counting_allocator, K, &stats);
-        counting_allocator.free(results);
+        const query = queries[i * DIMENSION ..][0..DIMENSION];
+        _ = try counted_scratch.search(&hnsw, query, K, &stats);
+    }
+    counted.resetStats();
+    for (0..total_queries) |i| {
+        var stats = vector.DistanceStats{};
+        const query = queries[(i % QUERY_COUNT) * DIMENSION ..][0..DIMENSION];
+        _ = try counted_scratch.search(&hnsw, query, K, &stats);
     }
 
     std.debug.print(
-        \\HNSW benchmark ({d} vectors, {d} dimensions, {d} queries)
+        \\HNSW benchmark ({d} vectors, {d} dimensions)
+        \\  Build mode: {s}
+        \\  HNSW: M={d}, ef_construction={d}, ef_search={d}, top_k={d}
+        \\  Queries: {d} warmup, {d} per run x {d} runs ({d} measured)
         \\  Throughput: {d:.2} queries/s
+        \\  Run throughput range: {d:.2} to {d:.2} queries/s
         \\  Latency mean: {d:.2} us
         \\  P50: {d:.2} us
         \\  P95: {d:.2} us
         \\  P99: {d:.2} us
         \\  CPU: {s}
         \\  RAM working set: {s}
-        \\  Allocations: {d} calls, {d} bytes total, {d} bytes peak live
+        \\  Backing allocations after scratch warmup: {d} calls, {d} bytes, {d} bytes peak live
         \\
     , .{
         DATASET_SIZE,
         DIMENSION,
+        @tagName(builtin.mode),
+        M,
+        EF_CONSTRUCTION,
+        EF_SEARCH,
+        K,
+        WARMUP_QUERIES,
         QUERY_COUNT,
+        MEASURED_RUNS,
+        total_queries,
         throughput,
-        @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, QUERY_COUNT) / 1_000.0,
+        min_run_throughput,
+        max_run_throughput,
+        @as(f64, @floatFromInt(elapsed_total)) / @as(f64, @floatFromInt(total_queries)) / 1_000.0,
         @as(f64, @floatFromInt(percentile(latencies, 50))) / 1_000.0,
         @as(f64, @floatFromInt(percentile(latencies, 95))) / 1_000.0,
         @as(f64, @floatFromInt(percentile(latencies, 99))) / 1_000.0,
-        cpuLabel(process_before, process_after, elapsed_ns),
+        cpuLabel(process_before, process_after, elapsed_total),
         memoryLabel(process_after),
         counted.allocations,
         counted.allocated_bytes,

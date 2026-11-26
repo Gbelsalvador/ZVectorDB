@@ -55,6 +55,31 @@ flowchart LR
 
 Le type `Document` actuellement utilisé par `Engine` est déclaré dans `engine.zig`; le fichier `src/document.zig` existe mais n'est pas encore relié à ce flux. `src/root.zig` exporte `Engine` comme module Zig. L'API HTTP v1 expose maintenant les opérations de base via des collections persistantes; les utilisateurs peuvent aussi continuer à passer par la CLI. Les composants WAL/snapshot et mmap restent expérimentaux et ne sont pas utilisés par l'Engine de la CLI.
 
+### Architecture du serveur HTTP v1
+
+Le serveur est une seconde entrée vers `Engine`, distincte de la CLI. Il reçoit des requêtes HTTP, les route vers les opérations JSON de l'API, puis délègue les opérations sur les documents et la recherche BM25 à l'`Engine` de la collection visée.
+
+```mermaid
+flowchart LR
+    Client["Client HTTP"] --> Main["main.zig<br/>commande server"]
+    Main --> Manager["CollectionManager<br/>registre + Engine par collection"]
+    Main --> Http["HttpServer<br/>écoute 127.0.0.1:8080"]
+    Http --> Pool["Pool de workers<br/>100 workers"]
+    Pool --> Router["Router<br/>méthode + route"]
+    Router --> Collections["Collections<br/>CRUD du registre"]
+    Router --> Documents["Documents<br/>CRUD JSON"]
+    Router --> Search["Recherche<br/>BM25"]
+    Collections --> Manager
+    Documents --> Engine["Engine de la collection"]
+    Search --> Engine
+    Manager --> Engine
+    Engine --> Index["Tokenizer + InvertedIndex<br/>SearchEngine + BM25"]
+    Engine --> Files["Fichiers persistants<br/>.db + .hnsw"]
+    Manager --> Registry[("zvectordb.collections")]
+```
+
+Au démarrage, `CollectionManager` charge le registre et ouvre un `Engine` par collection. Le serveur distribue chaque connexion à un worker; le routeur choisit ensuite le gestionnaire de collections, le CRUD de documents ou la recherche. Les réponses sont sérialisées en JSON. Le endpoint de recherche actuel utilise BM25; les fonctions vectorielles et hybrides disponibles via l'`Engine` ne sont pas encore exposées par ces routes HTTP.
+
 ## Démarrer la CLI
 
 Depuis la racine du projet:
@@ -112,9 +137,24 @@ Lancez le benchmark avec:
 zig build benchmark
 ```
 
-Il construit un index de 10 000 vecteurs de 128 dimensions puis exécute 1 000 recherches HNSW. Le rapport affiche le débit, la latence moyenne, P50/P95/P99, le temps CPU du processus, son working set mémoire, et le nombre/volume des allocations effectuées par les recherches. Les métriques système CPU et RAM sont disponibles sous Windows; les compteurs d'allocations des recherches sont suivis par l'allocateur de mesure.
+Il construit un index de 10 000 vecteurs de 128 dimensions (graine fixe), échauffe le chemin de recherche avec 200 requêtes, puis exécute cinq séries de 1 000 recherches sur 1 000 requêtes déterministes. Le rapport affiche le mode de compilation, les paramètres HNSW (`M`, `ef_construction`, `ef_search`, `top_k`), le débit global et sa plage par série, ainsi que les latences moyenne, P50/P95/P99 sur les 5 000 recherches. Il affiche aussi le temps CPU du processus, son working set mémoire et les demandes au backing allocator pendant une passe séparée de 5 000 recherches après préchauffage du `SearchScratch`. Ces compteurs mesurent les allocations sous-jacentes, pas les allocations internes de l'arena. Les métriques système CPU et RAM sont disponibles sous Windows. Pour comparer des changements, utilisez le même mode de compilation et les mêmes paramètres.
 
-Première mesure de référence avec `ReleaseFast`:
+Mesure actuelle sous Windows avec `ReleaseFast` et le protocole ci-dessus:
+
+| Mesure | Résultat |
+|---|---:|
+| Débit global | 4 358,04 recherches/s |
+| Débit par série | 4 198,55 à 4 443,30 recherches/s |
+| Latence moyenne | 229,46 µs |
+| P50 | 211,90 µs |
+| P95 | 346,20 µs |
+| P99 | 456,60 µs |
+| CPU processus | 99,4 % |
+| Working set RAM | 41,14 MiB |
+| Demandes au backing allocator pendant les recherches mesurées | 0 appel, 0 octet |
+| Scratch préalloué au début de la mesure (pic live) | 21 090 octets |
+
+Ancienne référence `ReleaseFast`, mesurée avec le protocole précédent (une seule requête répétée 1 000 fois). Elle n'est pas directement comparable aux mesures du protocole actuel:
 
 | Mesure | Résultat |
 |---|---:|
@@ -126,6 +166,14 @@ Première mesure de référence avec `ReleaseFast`:
 | CPU processus | 102,8 % |
 | Working set RAM | 21,33 MiB |
 | Allocations | 5 000 appels, 7 760 000 octets alloués, pic de 7 360 octets vivants |
+
+Ancienne mesure observée sous Windows avec le même protocole de recherche mais sans `SearchScratch`; son compteur incluait les allocations temporaires de chaque recherche. Elle est conservée pour montrer l'effet de la réutilisation des buffers, mais ses temps proviennent d'une exécution antérieure:
+
+| Mesure | Résultat sans scratch |
+|---|---:|
+| Débit | 3 752,83 recherches/s |
+| Latence moyenne | 266,47 µs |
+| Allocations mesurées | 26 980 appels, 51 155 200 octets |
 
 ## API HTTP v1
 
