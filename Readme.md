@@ -143,15 +143,16 @@ Mesure actuelle sous Windows avec `ReleaseFast` et le protocole ci-dessus:
 
 | Mesure | Résultat |
 |---|---:|
-| Débit global | 3 752,83 recherches/s |
-| Débit par série | 2 847,27 à 4 165,29 recherches/s |
-| Latence moyenne | 266,47 µs |
-| P50 | 225,60 µs |
-| P95 | 447,70 µs |
-| P99 | 878,50 µs |
-| CPU processus | 92,6 % |
-| Working set RAM | 24,94 MiB |
-| Allocations (ancienne passe sans `SearchScratch`) | 26 980 appels, 51 155 200 octets, pic de 12 000 octets vivants |
+| Débit global | 4 358,04 recherches/s |
+| Débit par série | 4 198,55 à 4 443,30 recherches/s |
+| Latence moyenne | 229,46 µs |
+| P50 | 211,90 µs |
+| P95 | 346,20 µs |
+| P99 | 456,60 µs |
+| CPU processus | 99,4 % |
+| Working set RAM | 41,14 MiB |
+| Demandes au backing allocator pendant les recherches mesurées | 0 appel, 0 octet |
+| Scratch préalloué au début de la mesure (pic live) | 21 090 octets |
 
 Ancienne référence `ReleaseFast`, mesurée avec le protocole précédent (une seule requête répétée 1 000 fois). Elle n'est pas directement comparable aux mesures du protocole actuel:
 
@@ -166,18 +167,13 @@ Ancienne référence `ReleaseFast`, mesurée avec le protocole précédent (une 
 | Working set RAM | 21,33 MiB |
 | Allocations | 5 000 appels, 7 760 000 octets alloués, pic de 7 360 octets vivants |
 
-Deux anciennes exécutions observées sous Windows (configuration de build non précisée), également avec le protocole précédent. Elles sont conservées comme historique et ne sont pas directement comparables aux nouvelles mesures:
+Ancienne mesure observée sous Windows avec le même protocole de recherche mais sans `SearchScratch`; son compteur incluait les allocations temporaires de chaque recherche. Elle est conservée pour montrer l'effet de la réutilisation des buffers, mais ses temps proviennent d'une exécution antérieure:
 
-| Mesure | Exécution 1 | Exécution 2 | Moyenne |
-|---|---:|---:|---:|
-| Débit | 834,26 recherches/s | 994,64 recherches/s | 914,45 recherches/s |
-| Latence moyenne | 1 198,66 µs | 1 005,39 µs | 1 102,03 µs |
-| P50 | 1 048,10 µs | 921,70 µs | — |
-| P95 | 1 917,90 µs | 1 410,70 µs | — |
-| P99 | 2 585,30 µs | 1 852,80 µs | — |
-| CPU processus | 99,1 % | 101,0 % | 100,1 % |
-| Working set RAM | 142,46 MiB | 142,03 MiB | 142,25 MiB |
-| Allocations | 5 000 appels, 7 760 000 octets, pic de 7 360 octets vivants | 5 000 appels, 7 760 000 octets, pic de 7 360 octets vivants | Identiques |
+| Mesure | Résultat sans scratch |
+|---|---:|
+| Débit | 3 752,83 recherches/s |
+| Latence moyenne | 266,47 µs |
+| Allocations mesurées | 26 980 appels, 51 155 200 octets |
 
 ## API HTTP v1
 

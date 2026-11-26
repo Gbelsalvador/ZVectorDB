@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const HNSW = @import("hnsw.zig").HNSW;
+const SearchScratch = @import("hnsw.zig").SearchScratch;
 const vector = @import("vector.zig");
 
 const DIMENSION = 128;
@@ -150,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
     const latencies = try base_allocator.alloc(u64, QUERY_COUNT * MEASURED_RUNS);
     defer base_allocator.free(latencies);
 
-    var timed_scratch = HNSW.SearchScratch.init(base_allocator);
+    var timed_scratch = SearchScratch.init(base_allocator);
     defer timed_scratch.deinit();
     for (0..WARMUP_QUERIES) |i| {
         const query = queries[(i % QUERY_COUNT) * DIMENSION ..][0..DIMENSION];
@@ -190,7 +191,7 @@ pub fn main(init: std.process.Init) !void {
     // tracking allocator does not distort the latency/throughput results.
     var counted = CountingAllocator{ .child = base_allocator };
     const counting_allocator = counted.allocator();
-    var counted_scratch = HNSW.SearchScratch.init(counting_allocator);
+    var counted_scratch = SearchScratch.init(counting_allocator);
     defer counted_scratch.deinit();
     // Size the reusable scratch buffers against every query, then count only
     // child-allocator requests made by the steady-state measured pass.
