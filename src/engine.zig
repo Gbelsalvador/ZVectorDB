@@ -205,7 +205,7 @@ pub const WalEngine = struct {
         try writer.flush();
         try current_tmp.sync(io);
         current_tmp.close(io);
-        try std.Io.Dir.cwd().rename(io, "CURRENT.tmp", "CURRENT");
+        try std.Io.Dir.cwd().rename("CURRENT.tmp", std.Io.Dir.cwd(), "CURRENT", io);
 
         self.snapshot_slot = next_slot;
 
@@ -583,7 +583,7 @@ pub const Engine = struct {
         journal.deinit(io);
         journal_open = false;
 
-        try std.Io.Dir.cwd().rename(io, temp_path, snapshot_path);
+        try std.Io.Dir.cwd().rename(temp_path, std.Io.Dir.cwd(), snapshot_path, io);
         const pointer_path = try std.fmt.allocPrint(self.allocator, "{s}.CURRENT", .{self.database_file});
         defer self.allocator.free(pointer_path);
         try writeDatabasePointer(io, self.allocator, pointer_path, next_slot);
@@ -664,7 +664,7 @@ fn installDatabaseSnapshot(io: anytype, allocator: std.mem.Allocator, database_p
     try file.sync(io);
     file.close(io);
     file_open = false;
-    try std.Io.Dir.cwd().rename(io, temp_path, database_path);
+    try std.Io.Dir.cwd().rename(temp_path, std.Io.Dir.cwd(), database_path, io);
 }
 
 fn databaseSnapshotPath(allocator: std.mem.Allocator, database_path: []const u8, slot: u8) ![]u8 {
@@ -703,7 +703,7 @@ fn writeDatabasePointer(io: anytype, allocator: std.mem.Allocator, path: []const
     try file.sync(io);
     file.close(io);
     file_open = false;
-    try std.Io.Dir.cwd().rename(io, temp_path, path);
+    try std.Io.Dir.cwd().rename(temp_path, std.Io.Dir.cwd(), path, io);
 }
 
 fn loadOrBuildHnsw(io: anytype, allocator: std.mem.Allocator, vector_index: *const VectorIndex, path: []const u8) !HNSW {

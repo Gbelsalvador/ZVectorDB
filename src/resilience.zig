@@ -10,6 +10,7 @@ var failures: usize = 0;
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.gpa;
+    defer clean(io);
     std.debug.print("ZvectorDB RAG resilience run\n", .{});
 
     try scenarioRestart(io, allocator);
