@@ -68,6 +68,8 @@ pub const Manager = struct {
         const paths = try storagePaths(self.allocator, name);
         defer self.allocator.free(paths.database);
         defer self.allocator.free(paths.hnsw);
+        const wal_path = try std.fmt.allocPrint(self.allocator, "{s}.wal", .{paths.database});
+        defer self.allocator.free(wal_path);
         const removed = self.entries.fetchRemove(name) orelse return false;
         self.persistRegistry() catch |err| {
             try self.entries.put(removed.key, removed.value);
@@ -82,6 +84,18 @@ pub const Manager = struct {
             error.FileNotFound => {},
             else => return err,
         };
+        std.Io.Dir.cwd().deleteFile(self.io, wal_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+        for (.{ ".CURRENT", ".snapshot.0", ".snapshot.1" }) |suffix| {
+            const path = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ paths.database, suffix });
+            defer self.allocator.free(path);
+            std.Io.Dir.cwd().deleteFile(self.io, path) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            };
+        }
         return true;
     }
 
@@ -181,6 +195,16 @@ fn deleteCollectionFiles(io: std.Io, allocator: std.mem.Allocator, name: []const
     const paths = storagePaths(allocator, name) catch return;
     defer allocator.free(paths.database);
     defer allocator.free(paths.hnsw);
+    const wal_path = allocator.alloc(u8, paths.database.len + ".wal".len) catch return;
+    defer allocator.free(wal_path);
+    @memcpy(wal_path[0..paths.database.len], paths.database);
+    @memcpy(wal_path[paths.database.len..], ".wal");
     std.Io.Dir.cwd().deleteFile(io, paths.database) catch {};
     std.Io.Dir.cwd().deleteFile(io, paths.hnsw) catch {};
+    std.Io.Dir.cwd().deleteFile(io, wal_path) catch {};
+    for (.{ ".CURRENT", ".snapshot.0", ".snapshot.1" }) |suffix| {
+        const path = std.fmt.allocPrint(allocator, "{s}{s}", .{ paths.database, suffix }) catch continue;
+        defer allocator.free(path);
+        std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    }
 }

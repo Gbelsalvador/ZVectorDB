@@ -53,7 +53,7 @@ flowchart LR
 
 `Engine` orchestre les opérations et la persistance. Le flux textuel indexe le contenu des documents via `Tokenizer` et `InvertedIndex`; `SearchEngine` applique le scorer `BM25`. Le flux vectoriel utilise `VectorIndex` pour la recherche exacte et HNSW pour la recherche approchée. Pour `query` et `hybrid`, `QueryEngine` planifie les sources, fusionne les candidats et effectue le reranking. Les documents et les vecteurs doivent actuellement avoir des identifiants alignés dans le même ordre pour être fusionnés.
 
-Le type `Document` actuellement utilisé par `Engine` est déclaré dans `engine.zig`; le fichier `src/document.zig` existe mais n'est pas encore relié à ce flux. `src/root.zig` exporte `Engine` comme module Zig. L'API HTTP v1 expose maintenant les opérations de base via des collections persistantes; les utilisateurs peuvent aussi continuer à passer par la CLI. Les composants WAL/snapshot et mmap restent expérimentaux et ne sont pas utilisés par l'Engine de la CLI.
+Le type `Document` actuellement utilisé par `Engine` est déclaré dans `engine.zig`; le fichier `src/document.zig` existe mais n'est pas encore relié à ce flux. `src/root.zig` exporte `Engine` comme module Zig. L'API HTTP v1 et la CLI partagent les collections persistantes et leur WAL avec checksum; les composants mmap et `WalEngine` vectoriel autonome restent expérimentaux.
 
 ### Architecture du serveur HTTP v1
 
@@ -79,6 +79,21 @@ flowchart LR
 ```
 
 Au démarrage, `CollectionManager` charge le registre et ouvre un `Engine` par collection. Le serveur distribue chaque connexion à un worker; le routeur choisit ensuite le gestionnaire de collections, le CRUD de documents ou la recherche. Les réponses sont sérialisées en JSON. Le endpoint de recherche actuel utilise BM25; les fonctions vectorielles et hybrides disponibles via l'`Engine` ne sont pas encore exposées par ces routes HTTP.
+
+### API locale HTTP / HTTPS
+
+Le mode par défaut reste HTTP sur `127.0.0.1:8080` pour le développement local. Le serveur rejette les en-têtes de plus de 16 KiB, les corps de plus de 1 MiB et limite le processus à 1 200 requêtes par minute; la validation JSON et des paramètres est effectuée par le routeur avant l'appel au moteur.
+
+Pour activer HTTPS localement, installez Caddy, définissez `ZVECTORDB_USER` et `ZVECTORDB_PASSWORD_HASH`, puis lancez l'API et Caddy dans deux terminaux. Créez le hash avec `caddy hash-password --plaintext`. Caddy utilise sa CA interne pour `localhost`, applique l'authentification Basic puis relaie vers l'API locale:
+
+```sh
+zig build run -- server 8080
+caddy run --config Caddyfile
+```
+
+L'URL HTTPS est `https://localhost:8443/api/v1`. Le navigateur ou le client local doit faire confiance à la CA locale de Caddy. Le listener Zig reste lié à loopback; le mode HTTPS est donc optionnel et le service n'est pas exposé directement à Internet. Zig 0.16 fournit un client TLS dans sa bibliothèque standard, mais pas de serveur TLS; le proxy local fournit la terminaison TLS.
+
+Le `Caddyfile` protège les requêtes HTTPS avec Basic Auth. Le limiteur de requêtes est global au processus et utilise une fenêtre fixe par minute, pas une limite par adresse IP. Pour chaque mutation RAG, le moteur sérialise l'état complet dans le slot snapshot inactif, synchronise ce snapshot, écrit puis synchronise le WAL CRC32, et bascule `CURRENT` par renommage atomique avant de compacter le journal. Au démarrage, le dernier snapshot WAL valide répare un snapshot actif interrompu; HNSW est ensuite chargé ou reconstruit depuis les vecteurs restaurés. Le format `.db` historique est lu pour migration; les nouveaux snapshots et le WAL sont propres à chaque base.
 
 ## Démarrer la CLI
 
@@ -127,7 +142,7 @@ zvectordb> train langage 100
 
 `vupdate <id> <csv>` modifie un vecteur et `vdelete <id>` le supprime. Les vecteurs suivants sont renumérotés après suppression.
 
-`train <mot> [époques]` entraîne un modèle Word2Vec sur les documents et affiche les cinq voisins du mot. Le modèle Word2Vec reste temporaire; les documents et les vecteurs de la CLI sont conservés dans `zvectordb.db`, et le graphe HNSW dans `zvectordb.hnsw`, dans le répertoire courant. Le stockage WAL/snapshot et mmap existent comme modules expérimentaux séparés.
+`train <mot> [époques]` entraîne un modèle Word2Vec sur les documents et affiche les cinq voisins du mot. Le modèle Word2Vec reste temporaire; les documents et les vecteurs de la CLI sont conservés dans `zvectordb.db`, et le graphe HNSW dans `zvectordb.hnsw`, dans le répertoire courant. Le WAL actif journalise un snapshot complet pour chaque mutation; mmap reste expérimental.
 
 ## Benchmark HNSW
 

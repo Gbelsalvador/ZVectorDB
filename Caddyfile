@@ -1,0 +1,9 @@
+# Optional local HTTPS mode. The Zig API remains HTTP on loopback (127.0.0.1:8080).
+# Start the API first, then run: caddy run --config Caddyfile
+https://localhost:8443 {
+	tls internal
+	basic_auth {
+		{$ZVECTORDB_USER} {$ZVECTORDB_PASSWORD_HASH}
+	}
+	reverse_proxy 127.0.0.1:8080
+}

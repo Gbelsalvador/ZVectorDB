@@ -16,18 +16,56 @@ const Wal = wal_mod.wal;
 const Operation = wal_mod.Operation;
 const Manifest = storage.Manifest;
 
+const DatabaseWalState = struct {
+    allocator: std.mem.Allocator,
+    latest_snapshot: ?[]u8 = null,
+
+    fn replay(context: *anyopaque, operation: Operation, payload: []const u8, sequence: u64) anyerror!void {
+        _ = sequence;
+        if (operation != .update) return error.UnsupportedWalOperation;
+        const self: *DatabaseWalState = @ptrCast(@alignCast(context));
+        const copy = try self.allocator.dupe(u8, payload);
+        if (self.latest_snapshot) |old| self.allocator.free(old);
+        self.latest_snapshot = copy;
+    }
+};
+
+const DatabasePointer = struct {
+    magic: [8]u8,
+    slot: u8,
+    reserved: [3]u8,
+    checksum: u32,
+};
+
+const SnapshotPointer = struct {
+    magic: [8]u8,
+    slot: u8,
+    reserved: [7]u8,
+    manifest: Manifest,
+};
+
 pub const WalEngine = struct {
     allocator: std.mem.Allocator,
     manifest: Manifest,
     wal: Wal,
     vectors: std.ArrayList(f32),
+    snapshot_slot: u8 = 0,
 
     var current_instance: ?*WalEngine = null;
 
     pub fn open(io: anytype, allocator: std.mem.Allocator, dir_path: []const u8) !WalEngine {
         _ = dir_path;
 
-        const manifest = storage.readManifest(io, "vectors.manifest") catch |err| switch (err) {
+        var snapshot_slot: u8 = 0;
+        const current = readSnapshotPointer(io) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => return err,
+        };
+        const manifest = if (current) |pointer| blk: {
+            if (pointer.slot > 1) return error.InvalidSnapshotPointer;
+            snapshot_slot = pointer.slot;
+            break :blk pointer.manifest;
+        } else storage.readManifest(io, "vectors.manifest") catch |err| switch (err) {
             error.FileNotFound => Manifest{
                 .magic = .{ 'Z', 'V', 'E', 'C', 'T', 'O', 'R' },
                 .version = 1,
@@ -55,9 +93,12 @@ pub const WalEngine = struct {
             .manifest = manifest,
             .wal = journal,
             .vectors = std.ArrayList(f32).empty,
+            .snapshot_slot = snapshot_slot,
         };
 
-        engine.loadSnapshot(io) catch |err| switch (err) {
+        if (current != null) {
+            try engine.loadSnapshotFrom(io, snapshotPath(snapshot_slot));
+        } else engine.loadSnapshotFrom(io, "vectors.bin") catch |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
         };
@@ -99,8 +140,8 @@ pub const WalEngine = struct {
         return false;
     }
 
-    fn loadSnapshot(self: *WalEngine, io: anytype) !void {
-        var file = try std.Io.Dir.cwd().openFile(io, "vectors.bin", .{ .mode = .read_only });
+    fn loadSnapshotFrom(self: *WalEngine, io: anytype, path: []const u8) !void {
+        var file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
         defer file.close(io);
 
         var read_buf: [4096]u8 = undefined;
@@ -118,10 +159,11 @@ pub const WalEngine = struct {
         current_instance = self;
         defer current_instance = null;
 
-        try Wal.replay(io, self.allocator, "vectors.wal", WalEngine.replayCallback);
+        const greatest = try Wal.replayAfter(io, self.allocator, "vectors.wal", self.manifest.last_sequence, WalEngine.replayCallback);
+        self.wal.next_sequence = @max(self.manifest.last_sequence, greatest) +| 1;
     }
 
-    fn replayCallback(operation: Operation, payload: []const u8) anyerror!void {
+    fn replayCallback(operation: Operation, payload: []const u8, sequence: u64) anyerror!void {
         const self = current_instance orelse return error.NoEngineContext;
 
         switch (operation) {
@@ -133,28 +175,65 @@ pub const WalEngine = struct {
 
                 @memcpy(std.mem.sliceAsBytes(temp_vector), payload);
                 try self.applyInsert(temp_vector);
+                self.manifest.last_sequence = sequence;
+                self.manifest.vector_count = self.vectors.items.len / self.manifest.dimension;
             },
             else => {},
         }
     }
 
-    pub fn checkpoint(self: *WalEngine, io: anytype) !void {
-        //
-        var file = try std.Io.Dir.cwd().createFile(io, "vectors.bin.tmp", .{});
-        defer file.close(io);
-
+    /// Writes the inactive snapshot, then atomically switches CURRENT. Only
+    /// after the switch is durable do we discard WAL entries covered by it.
+    pub fn compact(self: *WalEngine, io: anytype) !void {
+        const next_slot: u8 = 1 - self.snapshot_slot;
+        const snapshot_path = snapshotPath(next_slot);
+        var file = try std.Io.Dir.cwd().createFile(io, snapshot_path, .{});
         try storage.writeVectors(io, &file, self.vectors.items);
         try file.sync(io);
+        file.close(io);
 
-        try std.Io.Dir.cwd().rename(io, "vectors.bin.tmp", "vectors.bin");
+        const pointer = SnapshotPointer{
+            .magic = .{ 'Z', 'V', 'C', 'U', 'R', 'R', 'E', 'N' },
+            .slot = next_slot,
+            .reserved = .{0} ** 7,
+            .manifest = self.manifest,
+        };
+        var current_tmp = try std.Io.Dir.cwd().createFile(io, "CURRENT.tmp", .{});
+        var current_buf: [256]u8 = undefined;
+        var writer = current_tmp.writer(io, &current_buf);
+        try writer.interface.writeAll(std.mem.asBytes(&pointer));
+        try writer.flush();
+        try current_tmp.sync(io);
+        current_tmp.close(io);
+        try std.Io.Dir.cwd().rename("CURRENT.tmp", std.Io.Dir.cwd(), "CURRENT", io);
 
-        try storage.writeManifest(io, "vectors.manifest", self.manifest);
+        self.snapshot_slot = next_slot;
 
-        self.wal.next_sequence = 1;
         var truncate_wal = try std.Io.Dir.cwd().createFile(io, "vectors.wal", .{ .exclusive = false });
+        try truncate_wal.sync(io);
         truncate_wal.close(io);
+        self.wal.next_sequence = self.manifest.last_sequence +| 1;
+    }
+
+    pub fn checkpoint(self: *WalEngine, io: anytype) !void {
+        return self.compact(io);
     }
 };
+
+fn snapshotPath(slot: u8) []const u8 {
+    return if (slot == 0) "vectors.snapshot.0.bin" else "vectors.snapshot.1.bin";
+}
+
+fn readSnapshotPointer(io: anytype) !?SnapshotPointer {
+    var file = try std.Io.Dir.cwd().openFile(io, "CURRENT", .{ .mode = .read_only });
+    defer file.close(io);
+    var pointer: SnapshotPointer = undefined;
+    var read_buf: [256]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+    try reader.interface.readSliceAll(std.mem.asBytes(&pointer));
+    if (!std.mem.eql(u8, &pointer.magic, "ZVCURREN")) return error.InvalidSnapshotPointer;
+    return pointer;
+}
 
 pub const Document = struct {
     content: []u8,
@@ -176,8 +255,11 @@ pub const Engine = struct {
     restored: bool = false,
     database_file: []const u8 = "zvectordb.db",
     hnsw_file: []const u8 = "zvectordb.hnsw",
+    wal_file: []const u8 = "zvectordb.db.wal",
     owned_database_file: ?[]u8 = null,
     owned_hnsw_file: ?[]u8 = null,
+    owned_wal_file: ?[]u8 = null,
+    snapshot_slot: u8 = 1,
 
     const hnsw_m = 16;
     const hnsw_ef_construction = 64;
@@ -195,7 +277,40 @@ pub const Engine = struct {
 
     pub fn open(self: *Engine, io: anytype) !void {
         errdefer self.deinit();
-        if (storage.readDatabase(io, self.allocator, self.database_file)) |loaded_database| {
+        var wal_state = DatabaseWalState{ .allocator = self.allocator };
+        defer if (wal_state.latest_snapshot) |snapshot| self.allocator.free(snapshot);
+        ensureWalFile(io, self.wal_file) catch return error.WalUnavailable;
+        _ = try wal_mod.wal.replayWithContext(io, self.allocator, self.wal_file, &wal_state, DatabaseWalState.replay);
+        const pointer_path = try std.fmt.allocPrint(self.allocator, "{s}.CURRENT", .{self.database_file});
+        defer self.allocator.free(pointer_path);
+        var database_path = self.database_file;
+        var database_path_owned: ?[]u8 = null;
+        defer if (database_path_owned) |path| self.allocator.free(path);
+        const pointer = readDatabasePointer(io, pointer_path) catch |err| switch (err) {
+            error.FileNotFound => null,
+            error.InvalidSnapshotPointer, error.EndOfStream => if (wal_state.latest_snapshot != null) null else return err,
+            else => return err,
+        };
+        if (pointer) |active| {
+            if (active.slot > 1) return error.InvalidSnapshotPointer;
+            self.snapshot_slot = active.slot;
+            database_path_owned = try databaseSnapshotPath(self.allocator, self.database_file, active.slot);
+            database_path = database_path_owned.?;
+        }
+        if (wal_state.latest_snapshot) |snapshot| {
+            const next_slot: u8 = 1 - self.snapshot_slot;
+            const next_path = try databaseSnapshotPath(self.allocator, self.database_file, next_slot);
+            defer self.allocator.free(next_path);
+            try installDatabaseSnapshot(io, self.allocator, next_path, snapshot);
+            try writeDatabasePointer(io, self.allocator, pointer_path, next_slot);
+            if (database_path_owned) |path| self.allocator.free(path);
+            database_path_owned = null;
+            database_path_owned = try databaseSnapshotPath(self.allocator, self.database_file, next_slot);
+            database_path = database_path_owned.?;
+            self.snapshot_slot = next_slot;
+        }
+
+        if (storage.readDatabase(io, self.allocator, database_path)) |loaded_database| {
             var database = loaded_database;
             defer database.deinit(self.allocator);
             self.restored = true;
@@ -217,6 +332,7 @@ pub const Engine = struct {
         const loaded_hnsw = try loadOrBuildHnsw(io, self.allocator, &self.vector_index, self.hnsw_file);
         self.hnsw.deinit();
         self.hnsw = loaded_hnsw;
+        if (wal_state.latest_snapshot != null) try truncateWal(io, self.wal_file);
     }
 
     pub fn deinit(self: *Engine) void {
@@ -227,18 +343,24 @@ pub const Engine = struct {
         self.documents.deinit(self.allocator);
         if (self.owned_database_file) |path| self.allocator.free(path);
         if (self.owned_hnsw_file) |path| self.allocator.free(path);
+        if (self.owned_wal_file) |path| self.allocator.free(path);
     }
 
     pub fn setStoragePaths(self: *Engine, database_file: []const u8, hnsw_file: []const u8) !void {
         const owned_database = try self.allocator.dupe(u8, database_file);
         errdefer self.allocator.free(owned_database);
         const owned_hnsw = try self.allocator.dupe(u8, hnsw_file);
+        errdefer self.allocator.free(owned_hnsw);
+        const owned_wal = try std.fmt.allocPrint(self.allocator, "{s}.wal", .{database_file});
         if (self.owned_database_file) |path| self.allocator.free(path);
         if (self.owned_hnsw_file) |path| self.allocator.free(path);
+        if (self.owned_wal_file) |path| self.allocator.free(path);
         self.owned_database_file = owned_database;
         self.owned_hnsw_file = owned_hnsw;
+        self.owned_wal_file = owned_wal;
         self.database_file = owned_database;
         self.hnsw_file = owned_hnsw;
+        self.wal_file = owned_wal;
     }
 
     pub fn addDocument(self: *Engine, io: anytype, content: []const u8) !AddDocumentResult {
@@ -440,7 +562,33 @@ pub const Engine = struct {
         const contents = try self.allocator.alloc([]const u8, self.documents.items.len);
         defer self.allocator.free(contents);
         for (self.documents.items, 0..) |document, i| contents[i] = document.content;
-        try storage.writeDatabase(io, self.database_file, contents, self.vector_index.vectors.items, self.vector_index.dimension);
+        const next_slot: u8 = 1 - self.snapshot_slot;
+        const snapshot_path = try databaseSnapshotPath(self.allocator, self.database_file, next_slot);
+        defer self.allocator.free(snapshot_path);
+        const temp_path = try std.fmt.allocPrint(self.allocator, "{s}.tmp", .{snapshot_path});
+        defer self.allocator.free(temp_path);
+        defer std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
+
+        try storage.writeDatabase(io, temp_path, contents, self.vector_index.vectors.items, self.vector_index.dimension);
+        const snapshot = try readWholeFile(io, self.allocator, temp_path);
+        defer self.allocator.free(snapshot);
+
+        var journal = try Wal.init(io, self.wal_file);
+        var journal_open = true;
+        defer if (journal_open) journal.deinit(io);
+        var previous_wal = DatabaseWalState{ .allocator = self.allocator };
+        defer if (previous_wal.latest_snapshot) |old| self.allocator.free(old);
+        journal.next_sequence = (try wal_mod.wal.replayWithContext(io, self.allocator, self.wal_file, &previous_wal, DatabaseWalState.replay)) +| 1;
+        _ = try journal.append(io, .update, snapshot);
+        journal.deinit(io);
+        journal_open = false;
+
+        try std.Io.Dir.cwd().rename(temp_path, std.Io.Dir.cwd(), snapshot_path, io);
+        const pointer_path = try std.fmt.allocPrint(self.allocator, "{s}.CURRENT", .{self.database_file});
+        defer self.allocator.free(pointer_path);
+        try writeDatabasePointer(io, self.allocator, pointer_path, next_slot);
+        self.snapshot_slot = next_slot;
+        try truncateWal(io, self.wal_file);
     }
 
     fn persistVectorData(self: *Engine, io: anytype) !void {
@@ -474,6 +622,89 @@ pub const Engine = struct {
         _ = try self.hnsw.insert(converted, random_state.random());
     }
 };
+
+fn ensureWalFile(io: anytype, path: []const u8) !void {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write }) catch |err| switch (err) {
+        error.FileNotFound => try std.Io.Dir.cwd().createFile(io, path, .{}),
+        else => return err,
+    };
+    file.close(io);
+}
+
+fn truncateWal(io: anytype, path: []const u8) !void {
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    try file.sync(io);
+}
+
+fn readWholeFile(io: anytype, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
+    defer file.close(io);
+    const stats = try file.stat(io);
+    if (stats.size > std.math.maxInt(u32)) return error.DatabaseTooLarge;
+    const bytes = try allocator.alloc(u8, @intCast(stats.size));
+    errdefer allocator.free(bytes);
+    var buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &buffer);
+    try reader.interface.readSliceAll(bytes);
+    return bytes;
+}
+
+fn installDatabaseSnapshot(io: anytype, allocator: std.mem.Allocator, database_path: []const u8, snapshot: []const u8) !void {
+    const temp_path = try std.fmt.allocPrint(allocator, "{s}.recover.tmp", .{database_path});
+    defer allocator.free(temp_path);
+    defer std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
+    var file = try std.Io.Dir.cwd().createFile(io, temp_path, .{});
+    var file_open = true;
+    defer if (file_open) file.close(io);
+    var buffer: [4096]u8 = undefined;
+    var writer = file.writer(io, &buffer);
+    try writer.interface.writeAll(snapshot);
+    try writer.flush();
+    try file.sync(io);
+    file.close(io);
+    file_open = false;
+    try std.Io.Dir.cwd().rename(temp_path, std.Io.Dir.cwd(), database_path, io);
+}
+
+fn databaseSnapshotPath(allocator: std.mem.Allocator, database_path: []const u8, slot: u8) ![]u8 {
+    return try std.fmt.allocPrint(allocator, "{s}.snapshot.{d}", .{ database_path, slot });
+}
+
+fn readDatabasePointer(io: anytype, path: []const u8) !?DatabasePointer {
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
+    defer file.close(io);
+    var pointer: DatabasePointer = undefined;
+    var buffer: [64]u8 = undefined;
+    var reader = file.reader(io, &buffer);
+    try reader.interface.readSliceAll(std.mem.asBytes(&pointer));
+    if (!std.mem.eql(u8, &pointer.magic, "ZVDBCURR")) return error.InvalidSnapshotPointer;
+    if (pointer.checksum != std.hash.Crc32.hash(&.{pointer.slot})) return error.InvalidSnapshotPointer;
+    return pointer;
+}
+
+fn writeDatabasePointer(io: anytype, allocator: std.mem.Allocator, path: []const u8, slot: u8) !void {
+    const temp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
+    defer allocator.free(temp_path);
+    defer std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
+    var file = try std.Io.Dir.cwd().createFile(io, temp_path, .{});
+    var file_open = true;
+    defer if (file_open) file.close(io);
+    const pointer = DatabasePointer{
+        .magic = .{ 'Z', 'V', 'D', 'B', 'C', 'U', 'R', 'R' },
+        .slot = slot,
+        .reserved = .{0} ** 3,
+        .checksum = std.hash.Crc32.hash(&.{slot}),
+    };
+    var buffer: [64]u8 = undefined;
+    var writer = file.writer(io, &buffer);
+    try writer.interface.writeAll(std.mem.asBytes(&pointer));
+    try writer.flush();
+    try file.sync(io);
+    file.close(io);
+    file_open = false;
+    try std.Io.Dir.cwd().rename(temp_path, std.Io.Dir.cwd(), path, io);
+}
 
 fn loadOrBuildHnsw(io: anytype, allocator: std.mem.Allocator, vector_index: *const VectorIndex, path: []const u8) !HNSW {
     return HNSW.load(
