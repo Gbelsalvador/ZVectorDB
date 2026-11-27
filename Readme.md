@@ -80,6 +80,21 @@ flowchart LR
 
 Au démarrage, `CollectionManager` charge le registre et ouvre un `Engine` par collection. Le serveur distribue chaque connexion à un worker; le routeur choisit ensuite le gestionnaire de collections, le CRUD de documents ou la recherche. Les réponses sont sérialisées en JSON. Le endpoint de recherche actuel utilise BM25; les fonctions vectorielles et hybrides disponibles via l'`Engine` ne sont pas encore exposées par ces routes HTTP.
 
+### API locale HTTP / HTTPS
+
+Le mode par défaut reste HTTP sur `127.0.0.1:8080` pour le développement local. Le serveur rejette les en-têtes de plus de 16 KiB, les corps de plus de 1 MiB et limite le processus à 1 200 requêtes par minute; la validation JSON et des paramètres est effectuée par le routeur avant l'appel au moteur.
+
+Pour activer HTTPS localement, installez Caddy, définissez `ZVECTORDB_USER` et `ZVECTORDB_PASSWORD_HASH`, puis lancez l'API et Caddy dans deux terminaux. Créez le hash avec `caddy hash-password --plaintext`. Caddy utilise sa CA interne pour `localhost`, applique l'authentification Basic puis relaie vers l'API locale:
+
+```sh
+zig build run -- server 8080
+caddy run --config Caddyfile
+```
+
+L'URL HTTPS est `https://localhost:8443/api/v1`. Le navigateur ou le client local doit faire confiance à la CA locale de Caddy. Le listener Zig reste lié à loopback; le mode HTTPS est donc optionnel et le service n'est pas exposé directement à Internet. Zig 0.16 fournit un client TLS dans sa bibliothèque standard, mais pas de serveur TLS; le proxy local fournit la terminaison TLS.
+
+Le `Caddyfile` protège les requêtes HTTPS avec Basic Auth. Le limiteur de requêtes est global au processus et utilise une fenêtre fixe par minute, pas une limite par adresse IP. Le stockage actif du RAG est encore `.db` + `.hnsw`; le WAL/checksum présent dans `WalEngine` n'est pas encore branché sur ce chemin HTTP.
+
 ## Démarrer la CLI
 
 Depuis la racine du projet:

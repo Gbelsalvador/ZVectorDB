@@ -74,6 +74,8 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "Caddyfile",
+        "Readme.md",
         // For example...
         //"LICENSE",
         //"README.md",

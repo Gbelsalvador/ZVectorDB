@@ -1,10 +1,35 @@
 const std = @import("std");
 const Manager = @import("collection_manager.zig").Manager;
 const router = @import("router.zig");
+const Mutex = @import("../concurrency.zig").Mutex;
 
 const max_header_bytes = 16 * 1024;
 const max_body_bytes = 1024 * 1024;
 pub const worker_count = 100;
+const max_requests_per_minute = 1200;
+
+const RateLimiter = struct {
+    mutex: Mutex = .{},
+    window_start: ?@TypeOf(std.Io.Clock.awake.now(@as(std.Io, undefined))) = null,
+    count: usize = 0,
+
+    fn allow(self: *RateLimiter, io: std.Io) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.window_start) |start| {
+            const elapsed = start.untilNow(io, .awake).nanoseconds;
+            if (elapsed >= 60_000_000_000) {
+                self.window_start = std.Io.Clock.awake.now(io);
+                self.count = 0;
+            }
+        } else {
+            self.window_start = std.Io.Clock.awake.now(io);
+        }
+        if (self.count >= max_requests_per_minute) return false;
+        self.count += 1;
+        return true;
+    }
+};
 
 pub const ConnectionCounters = struct { accepted: u64 = 0, active: u64 = 0, completed: u64 = 0, failed: u64 = 0 };
 const Job = struct { stream: std.Io.net.Stream };
@@ -13,6 +38,7 @@ const ThreadPool = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     manager: *Manager,
+    rate_limiter: RateLimiter = .{},
     mutex: std.Io.Mutex = .init,
     available: std.Io.Condition = .init,
     jobs: std.ArrayList(Job) = .empty,
@@ -44,7 +70,7 @@ const ThreadPool = struct {
             _ = @atomicRmw(u64, &self.active, .Add, 1, .monotonic);
             self.mutex.unlock(self.io);
 
-            handleConnection(self.io, self.allocator, self.manager, job.stream) catch |err| {
+            handleConnection(self.io, self.allocator, self.manager, &self.rate_limiter, job.stream) catch |err| {
                 _ = @atomicRmw(u64, &self.failed, .Add, 1, .monotonic);
                 std.log.warn("HTTP request ignored: {s}", .{@errorName(err)});
                 _ = @atomicRmw(u64, &self.active, .Sub, 1, .monotonic);
@@ -93,7 +119,7 @@ pub fn serve(io: std.Io, allocator: std.mem.Allocator, manager: *Manager, port: 
     }
 }
 
-fn handleConnection(io: std.Io, allocator: std.mem.Allocator, manager: *Manager, stream: std.Io.net.Stream) !void {
+fn handleConnection(io: std.Io, allocator: std.mem.Allocator, manager: *Manager, limiter: *RateLimiter, stream: std.Io.net.Stream) !void {
     defer stream.close(io);
     var read_buffer: [4096]u8 = undefined;
     var reader = stream.reader(io, &read_buffer);
@@ -121,6 +147,12 @@ fn handleConnection(io: std.Io, allocator: std.mem.Allocator, manager: *Manager,
         try headers.writer.writeAll("\n");
     }
     if (content_length > max_body_bytes) return error.BodyTooLarge;
+    if (!limiter.allow(io)) {
+        const too_many = try allocator.dupe(u8, "{\"error\":\"rate_limit_exceeded\"}");
+        defer allocator.free(too_many);
+        try writeResponse(io, allocator, stream, .{ .status = 429, .body = too_many });
+        return;
+    }
     const request_line = headers.written();
     const line_end = std.mem.indexOfScalar(u8, request_line, '\n') orelse return error.InvalidRequest;
     var parts = std.mem.tokenizeScalar(u8, request_line[0..line_end], ' ');
@@ -141,6 +173,7 @@ fn writeResponse(io: std.Io, allocator: std.mem.Allocator, stream: std.Io.net.St
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        429 => "Too Many Requests",
         else => "Internal Server Error",
     };
     const header = try std.fmt.allocPrint(allocator, "HTTP/1.1 {d} {s}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{ result.status, reason, result.body.len });
