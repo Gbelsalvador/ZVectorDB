@@ -16,18 +16,35 @@ const Wal = wal_mod.wal;
 const Operation = wal_mod.Operation;
 const Manifest = storage.Manifest;
 
+const SnapshotPointer = struct {
+    magic: [8]u8,
+    slot: u8,
+    reserved: [7]u8,
+    manifest: Manifest,
+};
+
 pub const WalEngine = struct {
     allocator: std.mem.Allocator,
     manifest: Manifest,
     wal: Wal,
     vectors: std.ArrayList(f32),
+    snapshot_slot: u8 = 0,
 
     var current_instance: ?*WalEngine = null;
 
     pub fn open(io: anytype, allocator: std.mem.Allocator, dir_path: []const u8) !WalEngine {
         _ = dir_path;
 
-        const manifest = storage.readManifest(io, "vectors.manifest") catch |err| switch (err) {
+        var snapshot_slot: u8 = 0;
+        const current = readSnapshotPointer(io) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => return err,
+        };
+        const manifest = if (current) |pointer| blk: {
+            if (pointer.slot > 1) return error.InvalidSnapshotPointer;
+            snapshot_slot = pointer.slot;
+            break :blk pointer.manifest;
+        } else storage.readManifest(io, "vectors.manifest") catch |err| switch (err) {
             error.FileNotFound => Manifest{
                 .magic = .{ 'Z', 'V', 'E', 'C', 'T', 'O', 'R' },
                 .version = 1,
@@ -55,9 +72,12 @@ pub const WalEngine = struct {
             .manifest = manifest,
             .wal = journal,
             .vectors = std.ArrayList(f32).empty,
+            .snapshot_slot = snapshot_slot,
         };
 
-        engine.loadSnapshot(io) catch |err| switch (err) {
+        if (current != null) {
+            try engine.loadSnapshotFrom(io, snapshotPath(snapshot_slot));
+        } else engine.loadSnapshotFrom(io, "vectors.bin") catch |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
         };
@@ -99,8 +119,8 @@ pub const WalEngine = struct {
         return false;
     }
 
-    fn loadSnapshot(self: *WalEngine, io: anytype) !void {
-        var file = try std.Io.Dir.cwd().openFile(io, "vectors.bin", .{ .mode = .read_only });
+    fn loadSnapshotFrom(self: *WalEngine, io: anytype, path: []const u8) !void {
+        var file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
         defer file.close(io);
 
         var read_buf: [4096]u8 = undefined;
@@ -141,18 +161,32 @@ pub const WalEngine = struct {
         }
     }
 
-    /// Writes a durable snapshot and removes WAL entries covered by it.
-    /// Recovery resumes at the next sequence, so compaction never duplicates data.
+    /// Writes the inactive snapshot, then atomically switches CURRENT. Only
+    /// after the switch is durable do we discard WAL entries covered by it.
     pub fn compact(self: *WalEngine, io: anytype) !void {
-        var file = try std.Io.Dir.cwd().createFile(io, "vectors.bin.tmp", .{});
-        defer file.close(io);
-
+        const next_slot: u8 = 1 - self.snapshot_slot;
+        const snapshot_path = snapshotPath(next_slot);
+        var file = try std.Io.Dir.cwd().createFile(io, snapshot_path, .{});
         try storage.writeVectors(io, &file, self.vectors.items);
         try file.sync(io);
+        file.close(io);
 
-        try std.Io.Dir.cwd().rename(io, "vectors.bin.tmp", "vectors.bin");
+        const pointer = SnapshotPointer{
+            .magic = .{ 'Z', 'V', 'C', 'U', 'R', 'R', 'E', 'N' },
+            .slot = next_slot,
+            .reserved = .{0} ** 7,
+            .manifest = self.manifest,
+        };
+        var current_tmp = try std.Io.Dir.cwd().createFile(io, "CURRENT.tmp", .{});
+        var current_buf: [256]u8 = undefined;
+        var writer = current_tmp.writer(io, &current_buf);
+        try writer.interface.writeAll(std.mem.asBytes(&pointer));
+        try writer.flush();
+        try current_tmp.sync(io);
+        current_tmp.close(io);
+        try std.Io.Dir.cwd().rename(io, "CURRENT.tmp", "CURRENT");
 
-        try storage.writeManifest(io, "vectors.manifest", self.manifest);
+        self.snapshot_slot = next_slot;
 
         var truncate_wal = try std.Io.Dir.cwd().createFile(io, "vectors.wal", .{ .exclusive = false });
         try truncate_wal.sync(io);
@@ -164,6 +198,21 @@ pub const WalEngine = struct {
         return self.compact(io);
     }
 };
+
+fn snapshotPath(slot: u8) []const u8 {
+    return if (slot == 0) "vectors.snapshot.0.bin" else "vectors.snapshot.1.bin";
+}
+
+fn readSnapshotPointer(io: anytype) !?SnapshotPointer {
+    var file = try std.Io.Dir.cwd().openFile(io, "CURRENT", .{ .mode = .read_only });
+    defer file.close(io);
+    var pointer: SnapshotPointer = undefined;
+    var read_buf: [256]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+    try reader.interface.readSliceAll(std.mem.asBytes(&pointer));
+    if (!std.mem.eql(u8, &pointer.magic, "ZVCURREN")) return error.InvalidSnapshotPointer;
+    return pointer;
+}
 
 pub const Document = struct {
     content: []u8,
