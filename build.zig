@@ -90,6 +90,18 @@ pub fn build(b: *std.Build) void {
     const benchmark_run = b.addRunArtifact(benchmark_exe);
     benchmark_step.dependOn(&benchmark_run.step);
 
+    const resilience_exe = b.addExecutable(.{
+        .name = "ZvectorDB-resilience",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/resilience.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const resilience_step = b.step("resilience", "Run RAG storage and concurrency resilience scenarios");
+    const resilience_run = b.addRunArtifact(resilience_exe);
+    resilience_step.dependOn(&resilience_run.step);
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.
