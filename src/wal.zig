@@ -52,6 +52,7 @@ pub const wal = struct {
         operation: Operation,
         payload: []const u8,
     ) !u64 {
+        if (payload.len > std.math.maxInt(u32)) return error.PayloadTooLarge;
         const sequence = self.next_sequence;
         self.next_sequence += 1;
 
@@ -79,6 +80,13 @@ pub const wal = struct {
     }
 
     pub const ReplayFn = *const fn (
+        operation: Operation,
+        payload: []const u8,
+        sequence: u64,
+    ) anyerror!void;
+
+    pub const ReplayContextFn = *const fn (
+        context: *anyopaque,
         operation: Operation,
         payload: []const u8,
         sequence: u64,
@@ -134,6 +142,38 @@ pub const wal = struct {
             }
 
             if (header.sequence > after_sequence) try callback(header.operation, payload, header.sequence);
+        }
+        return greatest_sequence;
+    }
+
+    pub fn replayWithContext(
+        io: anytype,
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        context: *anyopaque,
+        callback: ReplayContextFn,
+    ) !u64 {
+        var file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
+        defer file.close(io);
+        var payload_buf: [4096]u8 = undefined;
+        var r = file.reader(io, &payload_buf);
+        try r.seekTo(0);
+        var greatest_sequence: u64 = 0;
+        while (true) {
+            var header: WalEntryHeader = undefined;
+            const header_bytes = std.mem.asBytes(&header);
+            const amt = try r.interface.readSliceShort(header_bytes);
+            if (amt == 0) break;
+            if (amt < header_bytes.len) return error.TruncatedWal;
+            if (!std.mem.eql(u8, &header.magic, "ZWAL")) return error.InvalidMagic;
+            if (header.version != 1) return error.UnsupportedVersion;
+            if (header.sequence <= greatest_sequence) return error.InvalidSequence;
+            greatest_sequence = header.sequence;
+            const payload = try allocator.alloc(u8, header.payload_len);
+            defer allocator.free(payload);
+            try r.interface.readSliceAll(payload);
+            if (checksum(payload) != header.checksum) return error.CorruptedWal;
+            try callback(context, header.operation, payload, header.sequence);
         }
         return greatest_sequence;
     }

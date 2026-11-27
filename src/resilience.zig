@@ -1,5 +1,6 @@
 const std = @import("std");
 const Engine = @import("engine.zig").Engine;
+const Wal = @import("wal.zig").wal;
 
 const database_path = "zv_resilience.db";
 const graph_path = "zv_resilience.hnsw";
@@ -12,6 +13,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("ZvectorDB RAG resilience run\n", .{});
 
     try scenarioRestart(io, allocator);
+    try scenarioWalRecovery(io, allocator);
     try scenarioCorruptGraph(io, allocator);
     try scenarioCorruptDatabase(io, allocator);
     try scenarioInvalidRequest(io, allocator);
@@ -37,6 +39,17 @@ fn report(name: []const u8, status: Status, detail: []const u8) void {
 fn clean(io: std.Io) void {
     std.Io.Dir.cwd().deleteFile(io, database_path) catch {};
     std.Io.Dir.cwd().deleteFile(io, graph_path) catch {};
+    std.Io.Dir.cwd().deleteFile(io, "zv_resilience.db.wal") catch {};
+    std.Io.Dir.cwd().deleteFile(io, "zv_resilience.db.tmp") catch {};
+    std.Io.Dir.cwd().deleteFile(io, "zv_resilience.db.recover.tmp") catch {};
+    std.Io.Dir.cwd().deleteFile(io, "zv_resilience.db.snapshot.0.tmp") catch {};
+    std.Io.Dir.cwd().deleteFile(io, "zv_resilience.db.snapshot.1.tmp") catch {};
+    std.Io.Dir.cwd().deleteFile(io, "zv_resilience.db.snapshot.0.recover.tmp") catch {};
+    std.Io.Dir.cwd().deleteFile(io, "zv_resilience.db.snapshot.1.recover.tmp") catch {};
+    std.Io.Dir.cwd().deleteFile(io, "zv_resilience.db.CURRENT") catch {};
+    std.Io.Dir.cwd().deleteFile(io, "zv_resilience.db.CURRENT.tmp") catch {};
+    std.Io.Dir.cwd().deleteFile(io, "zv_resilience.db.snapshot.0") catch {};
+    std.Io.Dir.cwd().deleteFile(io, "zv_resilience.db.snapshot.1") catch {};
 }
 
 fn newEngine(io: std.Io, allocator: std.mem.Allocator) !Engine {
@@ -73,7 +86,7 @@ fn scenarioCorruptDatabase(io: std.Io, allocator: std.mem.Allocator) !void {
         defer engine.deinit();
         _ = try engine.addDocument(io, "database corruption detection marker");
     }
-    var corrupt = try std.Io.Dir.cwd().createFile(io, database_path, .{});
+    var corrupt = try std.Io.Dir.cwd().createFile(io, "zv_resilience.db.snapshot.0", .{});
     var buffer: [32]u8 = undefined;
     var writer = corrupt.writer(io, &buffer);
     try writer.interface.writeAll("not a ZvectorDB database");
@@ -111,6 +124,50 @@ fn scenarioCorruptGraph(io: std.Io, allocator: std.mem.Allocator) !void {
         return;
     }
     report("Corrupted index file", .pass, "corrupt HNSW graph was rebuilt from the vector database");
+}
+
+fn scenarioWalRecovery(io: std.Io, allocator: std.mem.Allocator) !void {
+    clean(io);
+    {
+        var engine = try newEngine(io, allocator);
+        defer engine.deinit();
+        _ = try engine.addDocument(io, "WAL crash recovery marker");
+    }
+    const snapshot = try readWholeFile(io, allocator, "zv_resilience.db.snapshot.0");
+    defer allocator.free(snapshot);
+    var journal = try Wal.init(io, "zv_resilience.db.wal");
+    _ = try journal.append(io, .update, snapshot);
+    journal.deinit(io);
+
+    var damaged = try std.Io.Dir.cwd().createFile(io, "zv_resilience.db.snapshot.0", .{});
+    damaged.close(io);
+    var recovered = try newEngine(io, allocator);
+    defer recovered.deinit();
+    if (recovered.documents.items.len != 1 or
+        !std.mem.eql(u8, recovered.documents.items[0].content, "WAL crash recovery marker"))
+    {
+        report("WAL recovery", .fail, "latest checksummed WAL snapshot was not restored");
+        return;
+    }
+    var compacted_wal = try std.Io.Dir.cwd().openFile(io, "zv_resilience.db.wal", .{ .mode = .read_only });
+    defer compacted_wal.close(io);
+    if ((try compacted_wal.stat(io)).size != 0) {
+        report("WAL recovery", .fail, "recovered snapshot was not compacted from the journal");
+        return;
+    }
+    report("WAL recovery", .pass, "checksummed WAL snapshot restored the database after its file was damaged");
+}
+
+fn readWholeFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
+    defer file.close(io);
+    const stats = try file.stat(io);
+    const bytes = try allocator.alloc(u8, @intCast(stats.size));
+    errdefer allocator.free(bytes);
+    var buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &buffer);
+    try reader.interface.readSliceAll(bytes);
+    return bytes;
 }
 
 fn scenarioInvalidRequest(io: std.Io, allocator: std.mem.Allocator) !void {
