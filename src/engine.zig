@@ -118,10 +118,11 @@ pub const WalEngine = struct {
         current_instance = self;
         defer current_instance = null;
 
-        try Wal.replay(io, self.allocator, "vectors.wal", WalEngine.replayCallback);
+        const greatest = try Wal.replayAfter(io, self.allocator, "vectors.wal", self.manifest.last_sequence, WalEngine.replayCallback);
+        self.wal.next_sequence = @max(self.manifest.last_sequence, greatest) +| 1;
     }
 
-    fn replayCallback(operation: Operation, payload: []const u8) anyerror!void {
+    fn replayCallback(operation: Operation, payload: []const u8, sequence: u64) anyerror!void {
         const self = current_instance orelse return error.NoEngineContext;
 
         switch (operation) {
@@ -133,13 +134,16 @@ pub const WalEngine = struct {
 
                 @memcpy(std.mem.sliceAsBytes(temp_vector), payload);
                 try self.applyInsert(temp_vector);
+                self.manifest.last_sequence = sequence;
+                self.manifest.vector_count = self.vectors.items.len / self.manifest.dimension;
             },
             else => {},
         }
     }
 
-    pub fn checkpoint(self: *WalEngine, io: anytype) !void {
-        //
+    /// Writes a durable snapshot and removes WAL entries covered by it.
+    /// Recovery resumes at the next sequence, so compaction never duplicates data.
+    pub fn compact(self: *WalEngine, io: anytype) !void {
         var file = try std.Io.Dir.cwd().createFile(io, "vectors.bin.tmp", .{});
         defer file.close(io);
 
@@ -150,9 +154,14 @@ pub const WalEngine = struct {
 
         try storage.writeManifest(io, "vectors.manifest", self.manifest);
 
-        self.wal.next_sequence = 1;
         var truncate_wal = try std.Io.Dir.cwd().createFile(io, "vectors.wal", .{ .exclusive = false });
+        try truncate_wal.sync(io);
         truncate_wal.close(io);
+        self.wal.next_sequence = self.manifest.last_sequence +| 1;
+    }
+
+    pub fn checkpoint(self: *WalEngine, io: anytype) !void {
+        return self.compact(io);
     }
 };
 
